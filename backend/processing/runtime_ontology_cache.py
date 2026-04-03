@@ -1,4 +1,5 @@
 import threading
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -6,6 +7,8 @@ from processing.ttl_parser import parse_ttl
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+SNAPSHOT_PATH = BACKEND_DIR / "data" / "runtime_ontology_snapshot.json"
 DEFAULT_TTL_PATH = ROOT_DIR / "unified_ontology.ttl"
 
 _snapshot_lock = threading.Lock()
@@ -22,6 +25,11 @@ def get_runtime_ontology_snapshot(force_refresh: bool = False) -> Dict[str, Any]
     with _snapshot_lock:
         if not force_refresh and _parsed_snapshot is not None:
             return _parsed_snapshot
+
+        if SNAPSHOT_PATH.exists():
+            with SNAPSHOT_PATH.open("r", encoding="utf-8") as snapshot_file:
+                _parsed_snapshot = json.load(snapshot_file)
+                return _parsed_snapshot
 
         parsed = parse_ttl(str(DEFAULT_TTL_PATH))
         if "parse_error" in parsed:
