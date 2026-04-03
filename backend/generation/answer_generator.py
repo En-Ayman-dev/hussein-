@@ -25,6 +25,21 @@ class GeneratedAnswer:
 class AnswerGenerator:
     """Generates structured answers based on query intent and ontology context."""
 
+    RELATION_TYPE_LABELS = {
+        "belongsToCollection": "يندرج ضمن سلسلة",
+        "belongsToGroup": "يندرج تحت",
+        "belongsToLesson": "ينتمي إلى درس",
+        "causes": "يسبب",
+        "establishes": "يرسخ",
+        "isCausedBy": "ينتج عن",
+        "isConditionFor": "شرط لـ",
+        "isMeansFor": "يمهد إلى",
+        "negates": "ينفي",
+        "opposes": "يعارض",
+        "precedes": "يسبق",
+        "relatedTo": "يرتبط بـ",
+    }
+
     def __init__(self):
         """Initialize the answer generator."""
         self.templates = self._load_templates()
@@ -55,30 +70,6 @@ class AnswerGenerator:
             for token in ["كيف", "نتبع", "اتباع", "نطبق", "نعمل", "موقف", "واجب", "حل"]
         )
 
-    def _definition_sentence(self, primary_label: str, definition: str) -> str:
-        cleaned = (definition or "").strip()
-        if not cleaned:
-            return ""
-        if cleaned.startswith(primary_label):
-            return f"• يجب أن نفهم أن {cleaned}"
-        if cleaned.startswith(("هو", "هي")):
-            return f"• يجب أن نفهم أن {primary_label} {cleaned}"
-        return f"• يجب أن نفهم أن {primary_label} هو {cleaned}"
-
-    def _action_sentence(self, action: str) -> str:
-        cleaned = (action or "").strip()
-        if not cleaned:
-            return ""
-        if cleaned.startswith(("يجب", "لا يجوز", "ينبغي", "الواجب", "المطلوب")):
-            return f"• {cleaned}"
-        return f"• المطلوب عملياً: {cleaned}"
-
-    def _quote_section(self, title: str, quotes: List[str]) -> List[str]:
-        cleaned_quotes = self._clean_values(quotes)
-        if not cleaned_quotes:
-            return []
-        return [f"**{title}:**", f'"{cleaned_quotes[0]}"', ""]
-
     def _related_label(self, relation: ExpandedRelation, concept_uri: str) -> str:
         other_concept = (
             relation.target_concept
@@ -86,6 +77,135 @@ class AnswerGenerator:
             else relation.source_concept
         )
         return self._concept_label(other_concept)
+
+    def _relation_type_label(self, relation_type: str) -> str:
+        return self.RELATION_TYPE_LABELS.get(relation_type, "يرتبط بـ")
+
+    def _section(self, title: str, lines: List[str]) -> List[str]:
+        cleaned_lines = [line for line in lines if line and line.strip()]
+        if not cleaned_lines:
+            return []
+        return [f"**{title}**", *cleaned_lines, ""]
+
+    def _labeled_bullets(self, entries: List[tuple[str, str]]) -> List[str]:
+        return [f"• **{label}:** {text}" for label, text in entries if label and text]
+
+    def _quote_lines(self, entries: List[tuple[str, str]]) -> List[str]:
+        lines: List[str] = []
+        for label, text in entries:
+            if not label or not text:
+                continue
+            lines.append(f"> **{label}:** {text}")
+            lines.append("")
+        if lines and not lines[-1].strip():
+            lines.pop()
+        return lines
+
+    def _supporting_matches(
+        self,
+        concept: ConceptMatch,
+        supporting_matches: Optional[List[ConceptMatch]],
+    ) -> List[ConceptMatch]:
+        if not supporting_matches:
+            return []
+
+        primary_uri = concept.concept.uri
+        unique_matches: List[ConceptMatch] = []
+        seen_uris: set[str] = {primary_uri}
+
+        for match in supporting_matches:
+            uri = getattr(match.concept, "uri", None)
+            if not uri or uri in seen_uris:
+                continue
+            seen_uris.add(uri)
+            unique_matches.append(match)
+
+        return unique_matches
+
+    def _collect_match_field_entries(
+        self,
+        concept: ConceptMatch,
+        supporting_matches: Optional[List[ConceptMatch]],
+        field_name: str,
+    ) -> List[tuple[str, str]]:
+        entries: List[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add_from_match(match: ConceptMatch) -> None:
+            label = self._primary_label(match)
+            values = self._clean_values(getattr(match.concept, field_name, None))
+            for value in values:
+                signature = (label, value)
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                entries.append(signature)
+
+        add_from_match(concept)
+        for match in self._supporting_matches(concept, supporting_matches):
+            add_from_match(match)
+
+        return entries
+
+    def _relation_statement(self, relation: ExpandedRelation, concept_uri: str) -> str:
+        source_label = self._concept_label(relation.source_concept)
+        target_label = self._concept_label(relation.target_concept)
+        relation_label = self._relation_type_label(relation.relation.type.value)
+
+        if relation.relation.source_uri == concept_uri:
+            return f"• **{source_label}** {relation_label} **{target_label}**."
+        if relation.relation.target_uri == concept_uri:
+            return f"• **{source_label}** {relation_label} **{target_label}**."
+        return f"• **{source_label}** {relation_label} **{target_label}**."
+
+    def _group_relation_lines(
+        self,
+        concept: ConceptMatch,
+        relations: List[ExpandedRelation],
+    ) -> Dict[str, List[str]]:
+        grouped = {
+            "causes": [],
+            "means_for": [],
+            "opposes": [],
+            "establishes": [],
+            "related": [],
+            "structural": [],
+        }
+
+        for relation in relations:
+            statement = self._relation_statement(relation, concept.concept.uri)
+            relation_type = relation.relation.type.value
+
+            if relation_type in {"causes", "isCausedBy"}:
+                grouped["causes"].append(statement)
+            elif relation_type == "isMeansFor":
+                grouped["means_for"].append(statement)
+            elif relation_type == "opposes":
+                grouped["opposes"].append(statement)
+            elif relation_type == "establishes":
+                grouped["establishes"].append(statement)
+            elif relation_type in {"belongsToCollection", "belongsToGroup", "belongsToLesson", "precedes"}:
+                grouped["structural"].append(statement)
+            else:
+                grouped["related"].append(statement)
+
+        return grouped
+
+    def _supporting_summary_lines(self, concept: ConceptMatch, supporting_matches: Optional[List[ConceptMatch]]) -> List[str]:
+        lines: List[str] = []
+
+        for match in self._supporting_matches(concept, supporting_matches):
+            label = self._primary_label(match)
+            definitions = self._clean_values(match.concept.definition)
+            actions = self._clean_values(match.concept.actions)
+            if definitions:
+                lines.append(f"• **{label}:** {definitions[0]}")
+            elif actions:
+                lines.append(f"• **{label}:** {actions[0]}")
+            else:
+                lines.append(f"• **{label}**")
+
+        return lines
 
     def _load_templates(self) -> Dict[QueryIntent, str]:
         """Load answer templates for each intent."""
@@ -100,71 +220,31 @@ class AnswerGenerator:
         self,
         concept: ConceptMatch,
         relations: List[ExpandedRelation],
-        query: str
+        query: str,
+        supporting_matches: Optional[List[ConceptMatch]] = None,
     ) -> str:
         """Generate definition answer template."""
+        del query
         parts = []
         primary_label = self._primary_label(concept)
-        cleaned_quotes = self._clean_values(concept.concept.quote)
-        cleaned_definitions = self._clean_values(concept.concept.definition)
-        cleaned_actions = self._clean_values(concept.concept.actions)
-
         parts.append(f"**{primary_label}**")
         parts.append("")
-        parts.extend(self._quote_section("النص التأسيسي", cleaned_quotes))
 
-        if cleaned_definitions:
-            parts.append("**التعريف:**")
-            parts.append(self._definition_sentence(primary_label, cleaned_definitions[0]))
-            parts.append("")
+        quote_entries = self._collect_match_field_entries(concept, supporting_matches, "quote")
+        definition_entries = self._collect_match_field_entries(concept, supporting_matches, "definition")
+        action_entries = self._collect_match_field_entries(concept, supporting_matches, "actions")
+        importance_entries = self._collect_match_field_entries(concept, supporting_matches, "importance")
+        relation_groups = self._group_relation_lines(concept, relations)
 
-        establishes_relations = []
-        related_relations = []
-        opposing_relations = []
-        means_relations = []
-        for rel in relations:
-            if rel.depth != 0:
-                continue
-            rel_type = rel.relation.type.value
-            if rel_type == "establishes":
-                establishes_relations.append(rel)
-            elif rel_type == "opposes":
-                opposing_relations.append(rel)
-            elif rel_type == "isMeansFor":
-                means_relations.append(rel)
-            elif rel_type == "relatedTo":
-                related_relations.append(rel)
-
-        if establishes_relations or related_relations:
-            parts.append("**التحليل:**")
-            for rel in (establishes_relations[:2] + related_relations[:2]):
-                other_label = self._related_label(rel, concept.concept.uri)
-                if other_label:
-                    parts.append(f"• أليس هذا دليلاً على أن {primary_label} يرتبط بـ {other_label}؟")
-            parts.append("")
-
-        if opposing_relations:
-            parts.append("**ما الذي يجب الحذر منه؟**")
-            for rel in opposing_relations[:3]:
-                opposing_label = self._related_label(rel, concept.concept.uri)
-                if opposing_label:
-                    parts.append(f"• لا يجوز أن نغفل خطر {opposing_label}.")
-            parts.append("")
-
-        if self._query_requests_application(query) and (cleaned_actions or means_relations):
-            parts.append("**الموقف العملي:**")
-            for action in cleaned_actions[:3]:
-                action_line = self._action_sentence(action)
-                if action_line:
-                    parts.append(action_line)
-
-            for rel in means_relations[:3]:
-                if rel.relation.target_uri != concept.concept.uri:
-                    continue
-                related_label = self._related_label(rel, concept.concept.uri)
-                if related_label:
-                    parts.append(f"• ومن وسائل الالتزام بهذا المفهوم: {related_label}.")
-            parts.append("")
+        parts.extend(self._section("النصوص المؤسسة", self._quote_lines(quote_entries)))
+        parts.extend(self._section("التعريفات المباشرة", self._labeled_bullets(definition_entries)))
+        parts.extend(self._section("أهمية المفاهيم في هذا السياق", self._labeled_bullets(importance_entries)))
+        parts.extend(self._section("مفاهيم مساندة من نفس السياق", self._supporting_summary_lines(concept, supporting_matches)))
+        parts.extend(self._section("علاقات تؤسس المعنى", relation_groups["establishes"]))
+        parts.extend(self._section("روابط مرتبطة بالسؤال", relation_groups["related"]))
+        parts.extend(self._section("ما يجب الحذر منه", relation_groups["opposes"]))
+        parts.extend(self._section("المطلوب عملياً", self._labeled_bullets(action_entries)))
+        parts.extend(self._section("وسائل مرتبطة بالمفهوم", relation_groups["means_for"]))
 
         return "\n".join(parts).strip()
 
@@ -172,71 +252,27 @@ class AnswerGenerator:
         self,
         concept: ConceptMatch,
         relations: List[ExpandedRelation],
-        query: str
+        query: str,
+        supporting_matches: Optional[List[ConceptMatch]] = None,
     ) -> str:
         """Generate cause answer template."""
+        del query
         parts = []
         primary_label = self._primary_label(concept)
         parts.append(f"**{primary_label}**")
         parts.append("")
-        parts.extend(self._quote_section("النص التأسيسي", concept.concept.quote or []))
+        quote_entries = self._collect_match_field_entries(concept, supporting_matches, "quote")
+        definition_entries = self._collect_match_field_entries(concept, supporting_matches, "definition")
+        action_entries = self._collect_match_field_entries(concept, supporting_matches, "actions")
+        relation_groups = self._group_relation_lines(concept, relations)
 
-        # Direct causes
-        causes_relations = [
-            rel for rel in relations
-            if (
-                (rel.relation.type.value == "causes" and rel.relation.target_uri == concept.concept.uri)
-                or (rel.relation.type.value == "isCausedBy" and rel.relation.source_uri == concept.concept.uri)
-            )
-            and rel.depth == 0
-        ]
-
-        if causes_relations:
-            parts.append("**الأسباب:**")
-            for rel in causes_relations[:5]:  # Limit to 5
-                cause_concept = (
-                    rel.source_concept
-                    if rel.relation.type.value == "causes"
-                    else rel.target_concept
-                )
-                cause_label = self._concept_label(cause_concept)
-                if cause_label:
-                    parts.append(f"• يجب أن نعي أن من أسباب هذا الأمر: {cause_label}.")
-                    if cause_concept.definition and len(cause_concept.definition) > 0:
-                        # Add brief definition
-                        definition = cause_concept.definition[0][:100]
-                        if len(cause_concept.definition[0]) > 100:
-                            definition += "..."
-                        parts.append(f"• توضيح مختصر: {definition}")
-            parts.append("")
-
-        # Contributing factors from deeper relations
-        deeper_relations = [rel for rel in relations if rel.depth > 0]
-        if deeper_relations:
-            parts.append("**العوامل المساهمة:**")
-            for rel in deeper_relations[:3]:  # Limit to 3
-                related_concept = (
-                    rel.target_concept
-                    if rel.relation.source_uri == concept.concept.uri
-                    else rel.source_concept
-                )
-                related_label = self._concept_label(related_concept)
-                if related_label:
-                    parts.append(f"• وهناك عامل مرتبط أيضاً: {related_label}.")
-            parts.append("")
-
-        opposing_relations = [
-            rel for rel in relations
-            if rel.relation.type.value == "opposes" and rel.depth == 0
-        ]
-        if opposing_relations:
-            parts.append("**المشكلة المقابلة:**")
-            for rel in opposing_relations[:3]:
-                parts.append(f"• يتجلى الانحراف في {self._related_label(rel, concept.concept.uri)}.")
-            parts.append("")
-
-        if not parts:
-            return f"لم يتم العثور على أسباب محددة لـ {concept.concept.labels[0] if concept.concept.labels else 'هذا المفهوم'} في قاعدة البيانات."
+        parts.extend(self._section("النصوص المؤسسة", self._quote_lines(quote_entries)))
+        parts.extend(self._section("تعريفات مرتبطة بسبب السؤال", self._labeled_bullets(definition_entries)))
+        parts.extend(self._section("الأسباب والعوامل المباشرة", relation_groups["causes"]))
+        parts.extend(self._section("العلاقات المرتبطة بالسياق", relation_groups["related"]))
+        parts.extend(self._section("المشكلة أو الانحراف المقابل", relation_groups["opposes"]))
+        parts.extend(self._section("المفاهيم المساندة", self._supporting_summary_lines(concept, supporting_matches)))
+        parts.extend(self._section("ما ينبغي فعله", self._labeled_bullets(action_entries)))
 
         return "\n".join(parts).strip()
 
@@ -244,70 +280,27 @@ class AnswerGenerator:
         self,
         concept: ConceptMatch,
         relations: List[ExpandedRelation],
-        query: str
+        query: str,
+        supporting_matches: Optional[List[ConceptMatch]] = None,
     ) -> str:
         """Generate solution answer template."""
+        del query
         parts = []
         primary_label = self._primary_label(concept)
         parts.append(f"**{primary_label}**")
         parts.append("")
-        parts.extend(self._quote_section("النص التأسيسي", concept.concept.quote or []))
+        quote_entries = self._collect_match_field_entries(concept, supporting_matches, "quote")
+        definition_entries = self._collect_match_field_entries(concept, supporting_matches, "definition")
+        action_entries = self._collect_match_field_entries(concept, supporting_matches, "actions")
+        relation_groups = self._group_relation_lines(concept, relations)
 
-        # Direct solutions through isMeansFor
-        solution_relations = [
-            rel for rel in relations
-            if (
-                rel.relation.type.value == "isMeansFor"
-                and rel.relation.target_uri == concept.concept.uri
-                and rel.depth == 0
-            )
-        ]
-
-        if solution_relations:
-            parts.append("**الحلول والطرق:**")
-            for rel in solution_relations[:5]:  # Limit to 5
-                solution_concept = (
-                    rel.source_concept
-                )
-                solution_label = self._concept_label(solution_concept)
-                if solution_label:
-                    parts.append(f"• من الحلول العملية: {solution_label}.")
-                    if solution_concept.definition and len(solution_concept.definition) > 0:
-                        definition = solution_concept.definition[0][:100]
-                        if len(solution_concept.definition[0]) > 100:
-                            definition += "..."
-                        parts.append(f"• توضيح مختصر: {definition}")
-            parts.append("")
-
-        # Actions from the concept
-        if concept.concept.actions:
-            parts.append("**الإجراءات المقترحة:**")
-            for action in concept.concept.actions[:3]:  # Limit to 3
-                action_line = self._action_sentence(action)
-                if action_line:
-                    parts.append(action_line)
-            parts.append("")
-
-        # Related solutions from deeper relations
-        deeper_relations = [rel for rel in relations if rel.depth > 0]
-        if deeper_relations:
-            parts.append("**حلول إضافية:**")
-            for rel in deeper_relations[:3]:  # Limit to 3
-                related_concept = (
-                    rel.target_concept
-                    if rel.relation.source_uri == concept.concept.uri
-                    else rel.source_concept
-                )
-                if related_concept.labels and related_concept.actions:
-                    parts.append(f"• ويمكن الاستفادة أيضاً من {self._concept_label(related_concept)}:")
-                    for action in related_concept.actions[:2]:
-                        action_line = self._action_sentence(action)
-                        if action_line:
-                            parts.append(action_line)
-            parts.append("")
-
-        if not parts:
-            return f"لم يتم العثور على حلول محددة لـ {concept.concept.labels[0] if concept.concept.labels else 'هذا المفهوم'} في قاعدة البيانات."
+        parts.extend(self._section("النصوص المؤسسة", self._quote_lines(quote_entries)))
+        parts.extend(self._section("ما يوضح المعنى في سياق السؤال", self._labeled_bullets(definition_entries)))
+        parts.extend(self._section("الوسائل والعلاقات العملية", relation_groups["means_for"]))
+        parts.extend(self._section("المطلوب عملياً", self._labeled_bullets(action_entries)))
+        parts.extend(self._section("المفاهيم المساندة", self._supporting_summary_lines(concept, supporting_matches)))
+        parts.extend(self._section("علاقات مرتبطة بالموقف", relation_groups["related"] + relation_groups["establishes"]))
+        parts.extend(self._section("ما يجب الحذر منه", relation_groups["opposes"]))
 
         return "\n".join(parts).strip()
 
@@ -315,62 +308,24 @@ class AnswerGenerator:
         self,
         concept: ConceptMatch,
         relations: List[ExpandedRelation],
-        query: str
+        query: str,
+        supporting_matches: Optional[List[ConceptMatch]] = None,
     ) -> str:
         """Generate comparison answer template."""
+        del query
         parts = []
         primary_label = self._primary_label(concept)
         parts.append(f"**{primary_label}**")
         parts.append("")
-        parts.extend(self._quote_section("النص التأسيسي", concept.concept.quote or []))
+        quote_entries = self._collect_match_field_entries(concept, supporting_matches, "quote")
+        definition_entries = self._collect_match_field_entries(concept, supporting_matches, "definition")
+        relation_groups = self._group_relation_lines(concept, relations)
 
-        # Opposing concepts
-        oppose_relations = [
-            rel for rel in relations
-            if rel.relation.type.value == "opposes" and rel.depth == 0
-        ]
-
-        if oppose_relations:
-            parts.append("**المقارنة والاختلافات:**")
-            for rel in oppose_relations[:4]:  # Limit to 4
-                opposing_concept = (
-                    rel.target_concept
-                    if rel.relation.source_uri == concept.concept.uri
-                    else rel.source_concept
-                )
-                if opposing_concept.labels:
-                    parts.append(f"**مع {self._concept_label(opposing_concept)}:**")
-
-                    # Compare definitions
-                    if concept.concept.definition and opposing_concept.definition:
-                        parts.append(f"• يجب أن نفهم {primary_label} بوصفه: {concept.concept.definition[0][:150]}...")
-                        parts.append(f"• أما {self._concept_label(opposing_concept)} فيظهر بوصفه: {opposing_concept.definition[0][:150]}...")
-                        parts.append("")
-
-                    # Compare key differences
-                    if concept.concept.importance and opposing_concept.importance:
-                        parts.append("**الاختلافات الرئيسية:**")
-                        parts.append(f"• أهمية {primary_label}: {', '.join(concept.concept.importance)}")
-                        parts.append(f"• أهمية {self._concept_label(opposing_concept)}: {', '.join(opposing_concept.importance)}")
-                        parts.append("")
-        else:
-            parts.append("**المقارنة:**")
-            parts.append(f"لا يظهر في السياق مفهوم معارض مباشر لـ {primary_label}.")
-            parts.append("")
-
-        # Alternative perspectives from deeper relations
-        deeper_relations = [rel for rel in relations if rel.depth > 0 and rel.relation.type.value == "opposes"]
-        if deeper_relations:
-            parts.append("**منظورات بديلة:**")
-            for rel in deeper_relations[:2]:  # Limit to 2
-                related_concept = (
-                    rel.target_concept
-                    if rel.relation.source_uri == concept.concept.uri
-                    else rel.source_concept
-                )
-                if related_concept.labels:
-                    parts.append(f"• {related_concept.labels[0]} (من خلال علاقة غير مباشرة)")
-            parts.append("")
+        parts.extend(self._section("النصوص المؤسسة", self._quote_lines(quote_entries)))
+        parts.extend(self._section("تعريفات مرتبطة بالمقارنة", self._labeled_bullets(definition_entries)))
+        parts.extend(self._section("المفاهيم المعارضة أو المقابلة", relation_groups["opposes"]))
+        parts.extend(self._section("روابط أخرى في السياق", relation_groups["related"] + relation_groups["establishes"]))
+        parts.extend(self._section("المفاهيم المساندة", self._supporting_summary_lines(concept, supporting_matches)))
 
         return "\n".join(parts).strip()
 
@@ -378,7 +333,8 @@ class AnswerGenerator:
         self,
         query_analysis: QueryAnalysis,
         concept_match: Optional[ConceptMatch],
-        relation_result: Optional[RelationExpansionResult]
+        relation_result: Optional[RelationExpansionResult],
+        supporting_matches: Optional[List[ConceptMatch]] = None,
     ) -> GeneratedAnswer:
         """Generate a structured answer based on query analysis and context.
 
@@ -406,7 +362,7 @@ class AnswerGenerator:
             answer = f"تم العثور على المفهوم: {concept_match.concept.labels[0] if concept_match.concept.labels else concept_match.concept.uri}"
         else:
             relations = relation_result.relations if relation_result else []
-            answer = template_func(concept_match, relations, query_analysis.query)
+            answer = template_func(concept_match, relations, query_analysis.query, supporting_matches)
 
         # Collect sources
         sources_used = []
@@ -437,11 +393,12 @@ class AnswerGenerator:
 def generate_ontology_answer(
     query_analysis: QueryAnalysis,
     concept_match: Optional[ConceptMatch],
-    relation_result: Optional[RelationExpansionResult]
+    relation_result: Optional[RelationExpansionResult],
+    supporting_matches: Optional[List[ConceptMatch]] = None,
 ) -> GeneratedAnswer:
     """Convenience function to generate ontology answer."""
     generator = AnswerGenerator()
-    return generator.generate_answer(query_analysis, concept_match, relation_result)
+    return generator.generate_answer(query_analysis, concept_match, relation_result, supporting_matches)
 
 
 def create_answer_summary(answer: GeneratedAnswer) -> Dict[str, Any]:

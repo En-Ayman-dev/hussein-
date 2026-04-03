@@ -219,6 +219,51 @@ class ApiIntegrationTests(unittest.TestCase):
             ],
         )
 
+    def test_without_ai_relation_context_merges_with_definition_relations(self) -> None:
+        concept = SimpleNamespace(uri="concept:quran")
+        solution_relation = SimpleNamespace(relation=SimpleNamespace(id=1))
+        definition_relation = SimpleNamespace(relation=SimpleNamespace(id=2))
+        primary_result = SimpleNamespace(
+            concept=concept,
+            quote=[],
+            relations=[solution_relation],
+            total_relations_found=1,
+            max_depth_reached=False,
+        )
+        definition_result = SimpleNamespace(
+            concept=concept,
+            quote=[],
+            relations=[definition_relation],
+            total_relations_found=1,
+            max_depth_reached=False,
+        )
+
+        with patch.object(
+            main.relation_expander,
+            "expand_relations",
+            side_effect=[primary_result, definition_result],
+        ) as mocked_expand, patch.object(
+            main.relation_expander,
+            "_filter_and_rank_relations",
+            side_effect=lambda relations, max_relations=None: relations[:max_relations],
+        ):
+            result = main._expand_relation_context(
+                concept,
+                main.QueryIntent.SOLUTION,
+                8,
+                2,
+                use_ai=False,
+            )
+
+        self.assertEqual(len(result.relations), 2)
+        self.assertEqual(
+            mocked_expand.call_args_list,
+            [
+                call(concept, main.QueryIntent.SOLUTION, max_relations=8, max_depth=2),
+                call(concept, main.QueryIntent.DEFINITION, max_relations=8, max_depth=2),
+            ],
+        )
+
     def test_reindex_endpoint_uses_expanded_summary_shape(self) -> None:
         summary = {
             "concepts": {"total_concepts": 10, "stored_embeddings": 8, "generated_embeddings": 8, "skipped_embeddings": 2},

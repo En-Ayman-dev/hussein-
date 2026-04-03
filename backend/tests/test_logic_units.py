@@ -12,6 +12,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from generation.answer_validator import AnswerValidator
 from generation.answer_composer import AnswerComposer
+from generation.answer_generator import AnswerGenerator
 from processing.concept_matcher import ConceptMatch
 from processing.query_analyzer import QueryIntent, QueryAnalysis
 from processing.relation_expander import ExpandedRelation, RelationExpander
@@ -246,6 +247,99 @@ class AnswerComposerUnitTests(unittest.TestCase):
         self.assertIn("role_hint", context["supporting_concepts"][0])
         self.assertIn("foundational_quote", context["supporting_concepts"][0])
         self.assertIn("actions", context["supporting_concepts"][0])
+
+
+class AnswerGeneratorUnitTests(unittest.TestCase):
+    def test_template_generation_includes_rich_evidence_for_without_ai(self) -> None:
+        generator = AnswerGenerator()
+        primary = ConceptMatch(
+            concept=build_concept(
+                "concept:quran",
+                ["القرآن"],
+                definition=["كتاب الله المنزل على نبيه محمد."],
+                quote=["{كَلَّا إِنَّهَا تَذْكِرَةٌ}"],
+                actions=["الرجوع إليه في بناء الوعي."],
+                importance=["رئيسي"],
+            ),
+            confidence=0.95,
+            match_type="exact_label",
+            matched_text="القرآن",
+        )
+        supporting = [
+            ConceptMatch(
+                concept=build_concept(
+                    "concept:ayat",
+                    ["آيات الله"],
+                    definition=["حقائق إلهية هادية في مختلف مجالات الحياة."],
+                    quote=["هي أعلام على حقائق من الهدى."],
+                    actions=["التعامل معها كمصدر للمعرفة والهداية."],
+                    importance=["رئيسي"],
+                ),
+                confidence=0.88,
+                match_type="synonym",
+                matched_text="آيات الله",
+            ),
+            ConceptMatch(
+                concept=build_concept(
+                    "concept:tadlil",
+                    ["التضليل"],
+                    definition=["إخفاء الحقائق وتزييفها لصرف الأمة عن أهدافها."],
+                    quote=["من التضليل الشديد الذي يجيده اليهود."],
+                    actions=["كشفه وفضحه وعدم التسليم له."],
+                    importance=["رئيسي"],
+                ),
+                confidence=0.84,
+                match_type="exact_label",
+                matched_text="التضليل",
+            ),
+        ]
+        relations = [
+            ExpandedRelation(
+                relation=SimpleNamespace(
+                    id=1,
+                    source_uri="concept:quran",
+                    target_uri="concept:ayat",
+                    type=SimpleNamespace(value="establishes"),
+                ),
+                source_concept=primary.concept,
+                target_concept=supporting[0].concept,
+                depth=0,
+                relevance_score=1.0,
+            ),
+            ExpandedRelation(
+                relation=SimpleNamespace(
+                    id=2,
+                    source_uri="concept:tadlil",
+                    target_uri="concept:quran",
+                    type=SimpleNamespace(value="opposes"),
+                ),
+                source_concept=supporting[1].concept,
+                target_concept=primary.concept,
+                depth=0,
+                relevance_score=0.9,
+            ),
+        ]
+
+        answer = generator.generate_answer(
+            QueryAnalysis(
+                intent=QueryIntent.SOLUTION,
+                confidence=1.0,
+                keywords=["كيف", "القرآن", "وعي", "التضليل"],
+                method="rules",
+                query="كيف يبني القرآن وعي الأمة في مواجهة التضليل؟",
+            ),
+            primary,
+            SimpleNamespace(relations=relations),
+            supporting_matches=supporting,
+        )
+
+        self.assertIn("**النصوص المؤسسة**", answer.answer)
+        self.assertIn("> **القرآن:**", answer.answer)
+        self.assertIn("> **آيات الله:**", answer.answer)
+        self.assertIn("**المطلوب عملياً**", answer.answer)
+        self.assertIn("**المفاهيم المساندة**", answer.answer)
+        self.assertIn("**التضليل:**", answer.answer)
+        self.assertIn("**ما يجب الحذر منه**", answer.answer)
 
 
 if __name__ == "__main__":

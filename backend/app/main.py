@@ -42,7 +42,7 @@ from app.security import (
 )
 from processing.concept_matcher import ConceptMatcher
 from processing.query_analyzer import QueryAnalyzer, QueryIntent
-from processing.relation_expander import RelationExpander
+from processing.relation_expander import RelationExpander, RelationExpansionResult
 from processing.runtime_ontology_cache import get_runtime_ontology_snapshot, set_runtime_ontology_snapshot
 from processing.ttl_parser import parse_ttl
 from services.embedding_service import EmbeddingConfig, EmbeddingService
@@ -422,24 +422,58 @@ def _expand_relation_context(
         max_depth=max_depth,
     )
 
-    if not use_ai or primary_result.relations or intent == QueryIntent.DEFINITION:
+    if intent == QueryIntent.DEFINITION:
         return primary_result
 
-    fallback_result = relation_expander.expand_relations(
+    definition_result = relation_expander.expand_relations(
         concept,
         QueryIntent.DEFINITION,
         max_relations=max_relations,
         max_depth=max_depth,
     )
 
-    if fallback_result.relations:
+    if not use_ai:
+        merged_relations: list[Any] = []
+        seen_relation_ids: set[Any] = set()
+        for relation in [*primary_result.relations, *definition_result.relations]:
+            relation_id = getattr(getattr(relation, "relation", None), "id", None)
+            if relation_id in seen_relation_ids:
+                continue
+            seen_relation_ids.add(relation_id)
+            merged_relations.append(relation)
+
+        merged_relations = relation_expander._filter_and_rank_relations(
+            merged_relations,
+            max_relations=max_relations,
+        )
+
+        if len(merged_relations) != len(primary_result.relations):
+            logger.info(
+                "Expanded without_ai relation context with definition merge: concept=%s original_intent=%s merged_relations=%s",
+                getattr(concept, "uri", None),
+                getattr(intent, "value", str(intent)),
+                len(merged_relations),
+            )
+
+        return RelationExpansionResult(
+            concept=primary_result.concept,
+            quote=primary_result.quote,
+            relations=merged_relations,
+            total_relations_found=max(primary_result.total_relations_found, len(merged_relations)),
+            max_depth_reached=primary_result.max_depth_reached or definition_result.max_depth_reached,
+        )
+
+    if primary_result.relations:
+        return primary_result
+
+    if definition_result.relations:
         logger.info(
             "Expanded AI relation context with definition fallback: concept=%s original_intent=%s fallback_relations=%s",
             getattr(concept, "uri", None),
             getattr(intent, "value", str(intent)),
-            len(fallback_result.relations),
+            len(definition_result.relations),
         )
-        return fallback_result
+        return definition_result
 
     return primary_result
 

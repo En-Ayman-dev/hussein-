@@ -462,7 +462,12 @@ class AnswerComposer:
 
         if use_template:
             # Use template generation
-            answer = self.template_generator.generate_answer(query_analysis, concept_match, relation_result)
+            answer = self.template_generator.generate_answer(
+                query_analysis,
+                concept_match,
+                relation_result,
+                supporting_matches=supporting_matches,
+            )
             answer.method = "template"
             logger.info("Used template generation")
             return answer
@@ -486,7 +491,10 @@ class AnswerComposer:
                 len(context.get("context_evidence", {}).get("actions", [])),
             )
             fallback_answer = self.template_generator.generate_answer(
-                query_analysis, concept_match, relation_result
+                query_analysis,
+                concept_match,
+                relation_result,
+                supporting_matches=supporting_matches,
             )
             llm_result = self.llm_generator.generate_answer_with_fallback(
                 context,
@@ -524,7 +532,12 @@ class AnswerComposer:
         else:
             # Fallback to template if no LLM available
             logger.warning("No LLM available, falling back to template")
-            answer = self.template_generator.generate_answer(query_analysis, concept_match, relation_result)
+            answer = self.template_generator.generate_answer(
+                query_analysis,
+                concept_match,
+                relation_result,
+                supporting_matches=supporting_matches,
+            )
             answer.method = "template_fallback"
             return answer
 
