@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from core.models import Concept, ConceptSynonym
+from processing.runtime_ontology_cache import get_runtime_ontology_snapshot
 from processing.text_normalizer import ArabicNormalizer
 from services.embedding_service import EmbeddingService
 
@@ -106,12 +107,31 @@ class ConceptMatcher:
             return
         self.refresh_index()
 
-    def refresh_index(self) -> None:
+    def refresh_index(self, parsed_data: Optional[Dict[str, Any]] = None) -> None:
         """Reload all searchable concept data into memory."""
         with self._index_lock:
-            with self.SessionLocal() as db:
-                concepts = db.execute(select(Concept)).scalars().all()
-                synonyms = db.execute(select(ConceptSynonym)).scalars().all()
+            snapshot = parsed_data or get_runtime_ontology_snapshot()
+            concepts = [
+                Concept(
+                    id=index,
+                    uri=concept_data["uri"],
+                    labels=concept_data.get("labels", []),
+                    definition=concept_data.get("definition", []),
+                    quote=concept_data.get("quote", []),
+                    actions=concept_data.get("actions", []),
+                    importance=concept_data.get("importance", []),
+                )
+                for index, concept_data in enumerate(snapshot.get("concepts", []), start=1)
+            ]
+            synonyms = [
+                ConceptSynonym(
+                    id=index,
+                    subject_uri=synonym_data["subject"],
+                    predicate=synonym_data["predicate"],
+                    object_value=synonym_data["object"],
+                )
+                for index, synonym_data in enumerate(snapshot.get("synonyms", []), start=1)
+            ]
 
             concepts_by_uri = {concept.uri: concept for concept in concepts}
             concept_id_to_uri = {concept.id: concept.uri for concept in concepts if concept.id is not None}

@@ -3,11 +3,11 @@ import threading
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from core.models import Concept, ConceptRelation, RelationType
 from processing.query_analyzer import QueryIntent
+from processing.runtime_ontology_cache import get_runtime_ontology_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -76,18 +76,37 @@ class RelationExpander:
             return
         self.refresh_index()
 
-    def refresh_index(self) -> None:
+    def refresh_index(self, parsed_data: Optional[Dict[str, Any]] = None) -> None:
         """Reload relation graph into memory for fast traversal."""
         with self._graph_lock:
-            with self.SessionLocal() as db:
-                concepts = db.execute(select(Concept)).scalars().all()
-                relations = db.execute(select(ConceptRelation)).scalars().all()
-
+            snapshot = parsed_data or get_runtime_ontology_snapshot()
+            concepts = [
+                Concept(
+                    id=index,
+                    uri=concept_data["uri"],
+                    labels=concept_data.get("labels", []),
+                    definition=concept_data.get("definition", []),
+                    quote=concept_data.get("quote", []),
+                    actions=concept_data.get("actions", []),
+                    importance=concept_data.get("importance", []),
+                )
+                for index, concept_data in enumerate(snapshot.get("concepts", []), start=1)
+            ]
             concepts_by_uri = {concept.uri: concept for concept in concepts}
             outgoing_relations: dict[str, list[ConceptRelation]] = defaultdict(list)
             incoming_relations: dict[str, list[ConceptRelation]] = defaultdict(list)
 
-            for relation in relations:
+            for index, relation_data in enumerate(snapshot.get("relations", []), start=1):
+                try:
+                    relation = ConceptRelation(
+                        id=index,
+                        type=RelationType(relation_data["type"]),
+                        source_uri=relation_data["source"],
+                        target_uri=relation_data["target"],
+                    )
+                except ValueError:
+                    continue
+
                 if relation.source_uri not in concepts_by_uri or relation.target_uri not in concepts_by_uri:
                     continue
                 outgoing_relations[relation.source_uri].append(relation)

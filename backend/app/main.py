@@ -43,6 +43,7 @@ from app.security import (
 from processing.concept_matcher import ConceptMatcher
 from processing.query_analyzer import QueryAnalyzer
 from processing.relation_expander import RelationExpander
+from processing.runtime_ontology_cache import get_runtime_ontology_snapshot, set_runtime_ontology_snapshot
 from processing.ttl_parser import parse_ttl
 from services.embedding_service import EmbeddingConfig, EmbeddingService
 
@@ -263,14 +264,15 @@ def clear_query_cache() -> None:
         logger.warning("Failed to clear query cache in redis: %s", exc)
 
 
-def _refresh_runtime_indexes() -> None:
+def _refresh_runtime_indexes(parsed_data: Optional[Dict[str, Any]] = None) -> None:
+    snapshot = parsed_data or get_runtime_ontology_snapshot()
     for component_name, component in (
         ("concept_matcher", concept_matcher),
         ("concept_matcher_without_ai", concept_matcher_without_ai),
         ("relation_expander", relation_expander),
     ):
         try:
-            component.refresh_index()
+            component.refresh_index(snapshot)
         except Exception as exc:
             logger.warning("Failed to refresh %s runtime index: %s", component_name, exc)
 
@@ -626,6 +628,7 @@ def _service_status() -> Dict[str, str]:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _ensure_database_ready()
+    _refresh_runtime_indexes()
     yield
 
 
@@ -1070,7 +1073,8 @@ async def upload_ontology_file(
         stored_relation_ids = [relation.id for relation in stored_relations if relation.id is not None]
 
         db.commit()
-        _refresh_runtime_indexes()
+        set_runtime_ontology_snapshot(parsed_data)
+        _refresh_runtime_indexes(parsed_data)
 
         embedding_summary: Dict[str, Any] = {
             "concepts": {
