@@ -56,6 +56,7 @@ class ApiIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         main.redis_client = None
         main.request_security = RequestSecurityManager(redis_client=None)
+        main.clear_query_cache()
 
     def test_parser_and_database_counts_match_expected(self) -> None:
         parsed = parse_ttl(str(ROOT_DIR / "unified_ontology.ttl"))
@@ -180,6 +181,16 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("row_counts", audit_payload)
         self.assertIn("embedding_coverage", audit_payload)
         self.assertEqual(audit_payload["documents"]["status"], "not_ingested_from_current_ttl")
+
+    def test_memory_cache_fallback_is_used_when_redis_is_unavailable(self) -> None:
+        payload = minimal_query_response(mode="without_ai")
+        cache_key = "ontology_query:test-cache"
+
+        main.cache_response(cache_key, payload)
+        cached = main.get_cached_response(cache_key)
+
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["mode"], "without_ai")
 
     def test_reindex_endpoint_uses_expanded_summary_shape(self) -> None:
         summary = {

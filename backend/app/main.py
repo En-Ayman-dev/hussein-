@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,7 +31,7 @@ from core.models import (
     RelationType,
 )
 from generation.answer_composer import AnswerComposer
-from generation.answer_validator import AnswerValidator, validate_and_regenerate_answer
+from generation.answer_validator import AnswerValidator
 from app.security import (
     RateLimitExceeded,
     RateLimitRule,
@@ -59,6 +60,8 @@ CORS_ALLOWED_ORIGIN_REGEX = os.getenv("CORS_ALLOWED_ORIGIN_REGEX")
 CACHE_TTL_SECONDS = 3600
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
 MAX_QUESTION_LENGTH = 500
+ENABLE_AI_REGENERATION = os.getenv("ENABLE_AI_REGENERATION", "").strip().lower() in {"1", "true", "yes", "on"}
+AI_MAX_REGENERATION_ATTEMPTS = int(os.getenv("AI_MAX_REGENERATION_ATTEMPTS", "1")) if ENABLE_AI_REGENERATION else 0
 RELATION_TYPE_LABELS = {
     "BELONGS_TO_COLLECTION": "يندرج ضمن سلسلة",
     "BELONGS_TO_GROUP": "يندرج تحت",
@@ -109,9 +112,10 @@ query_analyzer = QueryAnalyzer(openai_api_key=OPENAI_API_KEY)
 query_analyzer_without_ai = QueryAnalyzer(openai_api_key=None)
 concept_matcher = ConceptMatcher(DATABASE_URL, OPENAI_API_KEY)
 concept_matcher_without_ai = ConceptMatcher(DATABASE_URL, openai_api_key=None)
+relation_expander = RelationExpander(DATABASE_URL)
 answer_composer = AnswerComposer(openai_api_key=OPENAI_API_KEY)
 answer_composer_without_ai = AnswerComposer(openai_api_key=None)
-answer_validator = AnswerValidator()
+answer_validator = AnswerValidator(max_regeneration_attempts=AI_MAX_REGENERATION_ATTEMPTS)
 embedding_service = None
 
 if OPENAI_API_KEY:
@@ -184,29 +188,70 @@ def generate_cache_key(request: QueryRequest, mode: str) -> str:
     return f"ontology_query:{digest}"
 
 
-def get_cached_response(cache_key: str) -> Optional[Dict[str, Any]]:
-    if not redis_client:
-        return None
+class InMemoryQueryCache:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[str, tuple[float, str]] = {}
 
-    try:
-        cached_data = redis_client.get(cache_key)
-        return json.loads(cached_data) if cached_data else None
-    except Exception as exc:
-        logger.warning("Failed to read cached response: %s", exc)
-        return None
+    def get(self, key: str) -> Optional[str]:
+        now = time.time()
+        with self._lock:
+            cached = self._entries.get(key)
+            if not cached:
+                return None
+
+            expires_at, payload = cached
+            if expires_at <= now:
+                self._entries.pop(key, None)
+                return None
+
+            return payload
+
+    def set(self, key: str, payload: Dict[str, Any], ttl_seconds: int) -> None:
+        with self._lock:
+            self._entries[key] = (
+                time.time() + ttl_seconds,
+                json.dumps(payload, ensure_ascii=False),
+            )
+
+    def clear_prefix(self, prefix: str) -> None:
+        with self._lock:
+            keys_to_delete = [cache_key for cache_key in self._entries if cache_key.startswith(prefix)]
+            for cache_key in keys_to_delete:
+                self._entries.pop(cache_key, None)
+
+
+memory_query_cache = InMemoryQueryCache()
+
+
+def get_cached_response(cache_key: str) -> Optional[Dict[str, Any]]:
+    if redis_client:
+        try:
+            cached_data = redis_client.get(cache_key)
+            if cached_data:
+                return json.loads(cached_data)
+        except Exception as exc:
+            logger.warning("Failed to read cached response from redis: %s", exc)
+
+    cached_data = memory_query_cache.get(cache_key)
+    return json.loads(cached_data) if cached_data else None
 
 
 def cache_response(cache_key: str, response_data: Dict[str, Any]) -> None:
+    memory_query_cache.set(cache_key, response_data, CACHE_TTL_SECONDS)
+
     if not redis_client:
         return
 
     try:
         redis_client.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(response_data, ensure_ascii=False))
     except Exception as exc:
-        logger.warning("Failed to cache response: %s", exc)
+        logger.warning("Failed to cache response in redis: %s", exc)
 
 
 def clear_query_cache() -> None:
+    memory_query_cache.clear_prefix("ontology_query:")
+
     if not redis_client:
         return
 
@@ -215,7 +260,19 @@ def clear_query_cache() -> None:
         if keys:
             redis_client.delete(*keys)
     except Exception as exc:
-        logger.warning("Failed to clear query cache: %s", exc)
+        logger.warning("Failed to clear query cache in redis: %s", exc)
+
+
+def _refresh_runtime_indexes() -> None:
+    for component_name, component in (
+        ("concept_matcher", concept_matcher),
+        ("concept_matcher_without_ai", concept_matcher_without_ai),
+        ("relation_expander", relation_expander),
+    ):
+        try:
+            component.refresh_index()
+        except Exception as exc:
+            logger.warning("Failed to refresh %s runtime index: %s", component_name, exc)
 
 
 def _truncate_text(text_value: str, max_length: int = 250) -> str:
@@ -774,20 +831,35 @@ def _database_audit(db: Session) -> Dict[str, Any]:
 
 
 async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, Any]:
-    start_time = time.time()
+    request_started_at = time.perf_counter()
     mode = "ai" if use_ai else "without_ai"
+    stage_timings: dict[str, float] = {}
+
+    def _record_stage(stage_name: str, stage_started_at: float) -> None:
+        stage_timings[stage_name] = round(time.perf_counter() - stage_started_at, 4)
+
+    sanitize_started_at = time.perf_counter()
     try:
         sanitized_question = sanitize_question(request.question, max_length=MAX_QUESTION_LENGTH)
     except SanitizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _record_stage("sanitize", sanitize_started_at)
 
     normalized_request = request.model_copy(update={"question": sanitized_question})
     cache_key = generate_cache_key(normalized_request, mode)
 
+    cache_lookup_started_at = time.perf_counter()
     cached_response = get_cached_response(cache_key)
+    _record_stage("cache_lookup", cache_lookup_started_at)
     if cached_response:
         cached_response.setdefault("mode", mode)
-        cached_response["processing_time"] = round(time.time() - start_time, 2)
+        cached_response["processing_time"] = round(time.perf_counter() - request_started_at, 2)
+        logger.info(
+            "Processed query mode=%s cache=hit total=%.3fs timings=%s",
+            mode,
+            time.perf_counter() - request_started_at,
+            stage_timings,
+        )
         return cached_response
 
     try:
@@ -796,16 +868,28 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
         selected_answer_composer = answer_composer if use_ai else answer_composer_without_ai
         use_vector_search = normalized_request.use_embeddings if use_ai else False
 
+        analyze_started_at = time.perf_counter()
         query_analysis = selected_query_analyzer.analyze_query(normalized_request.question)
+        _record_stage("analyze", analyze_started_at)
+
+        match_started_at = time.perf_counter()
         top_concepts = selected_concept_matcher.find_top_concepts(
             normalized_request.question,
             use_vector=use_vector_search,
             max_concepts=3,
         )
+        _record_stage("match", match_started_at)
 
         if not top_concepts:
-            response_data = _build_no_match_response(query_analysis.intent.value, start_time, mode)
+            response_data = _build_no_match_response(query_analysis.intent.value, time.time(), mode)
+            response_data["processing_time"] = round(time.perf_counter() - request_started_at, 2)
             cache_response(cache_key, response_data)
+            logger.info(
+                "Processed query mode=%s method=no_match total=%.3fs timings=%s",
+                mode,
+                time.perf_counter() - request_started_at,
+                stage_timings,
+            )
             return response_data
 
         unique_concepts = []
@@ -818,12 +902,16 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
             unique_concepts.append(candidate)
 
         selected_concept = unique_concepts[0]
-        relation_result = RelationExpander(
-            DATABASE_URL,
+        relations_started_at = time.perf_counter()
+        relation_result = relation_expander.expand_relations(
+            selected_concept.concept,
+            query_analysis.intent,
             max_relations=normalized_request.max_relations,
             max_depth=normalized_request.max_depth,
-        ).expand_relations(selected_concept.concept, query_analysis.intent)
+        )
+        _record_stage("expand_relations", relations_started_at)
 
+        compose_started_at = time.perf_counter()
         composed_answer = selected_answer_composer.compose_answer(
             query_analysis.intent,
             normalized_request.question,
@@ -832,9 +920,15 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
             query_analysis,
             supporting_matches=unique_concepts[1:4],
         )
-        regeneration_composer = selected_answer_composer if (use_ai and composed_answer.method == "llm") else None
+        _record_stage("compose", compose_started_at)
+        regeneration_composer = (
+            selected_answer_composer
+            if (ENABLE_AI_REGENERATION and use_ai and composed_answer.method == "llm")
+            else None
+        )
 
-        final_answer, validation = validate_and_regenerate_answer(
+        validate_started_at = time.perf_counter()
+        final_answer, validation = answer_validator.validate_and_regenerate(
             composed_answer.answer,
             query_analysis.intent,
             normalized_request.question,
@@ -842,6 +936,7 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
             relation_result,
             regeneration_composer,
         )
+        _record_stage("validate", validate_started_at)
 
         formatted_top_concepts = [
             {
@@ -865,7 +960,7 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
             "mode": mode,
             "sources": composed_answer.sources_used,
             "token_usage": composed_answer.token_usage,
-            "processing_time": round(time.time() - start_time, 2),
+            "processing_time": round(time.perf_counter() - request_started_at, 2),
             "validation_score": round(validation.score, 3),
             "method": composed_answer.method,
             "matched_concept": selected_concept.concept.uri,
@@ -877,10 +972,13 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
         }
 
         logger.info(
-            "Processed query mode=%s method=%s matched=%s",
+            "Processed query mode=%s method=%s matched=%s total=%.3fs timings=%s regeneration=%s",
             mode,
             composed_answer.method,
             selected_concept.concept.uri,
+            time.perf_counter() - request_started_at,
+            stage_timings,
+            ENABLE_AI_REGENERATION and use_ai and composed_answer.method == "llm",
         )
         cache_response(cache_key, response_data)
         return response_data
@@ -972,6 +1070,7 @@ async def upload_ontology_file(
         stored_relation_ids = [relation.id for relation in stored_relations if relation.id is not None]
 
         db.commit()
+        _refresh_runtime_indexes()
 
         embedding_summary: Dict[str, Any] = {
             "concepts": {

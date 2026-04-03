@@ -1,6 +1,8 @@
 import logging
-from typing import List, Dict, Any, Optional, Set
+import threading
+from collections import defaultdict
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -59,10 +61,48 @@ class RelationExpander:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
-        self.engine = create_engine(database_url)
+        self.engine = create_engine(database_url, pool_pre_ping=True)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         self.max_relations = max_relations
         self.max_depth = max_depth
+        self._graph_lock = threading.Lock()
+        self._graph_ready = False
+        self._concepts_by_uri: dict[str, Concept] = {}
+        self._outgoing_relations: dict[str, list[ConceptRelation]] = defaultdict(list)
+        self._incoming_relations: dict[str, list[ConceptRelation]] = defaultdict(list)
+
+    def _ensure_graph_loaded(self) -> None:
+        if self._graph_ready:
+            return
+        self.refresh_index()
+
+    def refresh_index(self) -> None:
+        """Reload relation graph into memory for fast traversal."""
+        with self._graph_lock:
+            with self.SessionLocal() as db:
+                concepts = db.execute(select(Concept)).scalars().all()
+                relations = db.execute(select(ConceptRelation)).scalars().all()
+
+            concepts_by_uri = {concept.uri: concept for concept in concepts}
+            outgoing_relations: dict[str, list[ConceptRelation]] = defaultdict(list)
+            incoming_relations: dict[str, list[ConceptRelation]] = defaultdict(list)
+
+            for relation in relations:
+                if relation.source_uri not in concepts_by_uri or relation.target_uri not in concepts_by_uri:
+                    continue
+                outgoing_relations[relation.source_uri].append(relation)
+                incoming_relations[relation.target_uri].append(relation)
+
+            self._concepts_by_uri = concepts_by_uri
+            self._outgoing_relations = outgoing_relations
+            self._incoming_relations = incoming_relations
+            self._graph_ready = True
+
+        logger.info(
+            "Relation expander graph loaded: concepts=%s relations=%s",
+            len(self._concepts_by_uri),
+            sum(len(relations) for relations in self._outgoing_relations.values()),
+        )
 
     def _get_concept_by_uri(self, db: Session, uri: str) -> Optional[Concept]:
         """Get concept by URI.
@@ -74,8 +114,9 @@ class RelationExpander:
         Returns:
             Concept or None
         """
-        stmt = select(Concept).where(Concept.uri == uri)
-        return db.execute(stmt).scalar_one_or_none()
+        del db
+        self._ensure_graph_loaded()
+        return self._concepts_by_uri.get(uri)
 
     def _get_direct_relations(
         self,
@@ -95,23 +136,24 @@ class RelationExpander:
         Returns:
             List of relations
         """
-        relations = []
+        del db
+        self._ensure_graph_loaded()
+        relation_type_set = set(relation_types)
+        relations: list[ConceptRelation] = []
 
         if direction in ["outgoing", "both"]:
-            # Outgoing relations (concept is source)
-            stmt = select(ConceptRelation).where(
-                ConceptRelation.source_uri == concept_uri,
-                ConceptRelation.type.in_(relation_types)
+            relations.extend(
+                relation
+                for relation in self._outgoing_relations.get(concept_uri, [])
+                if relation.type in relation_type_set
             )
-            relations.extend(db.execute(stmt).scalars().all())
 
         if direction in ["incoming", "both"]:
-            # Incoming relations (concept is target)
-            stmt = select(ConceptRelation).where(
-                ConceptRelation.target_uri == concept_uri,
-                ConceptRelation.type.in_(relation_types)
+            relations.extend(
+                relation
+                for relation in self._incoming_relations.get(concept_uri, [])
+                if relation.type in relation_type_set
             )
-            relations.extend(db.execute(stmt).scalars().all())
 
         return relations
 
@@ -122,7 +164,8 @@ class RelationExpander:
         relation_types: List[RelationType],
         current_depth: int = 0,
         visited: Optional[Set[str]] = None,
-        max_to_collect: Optional[int] = None
+        max_to_collect: Optional[int] = None,
+        max_depth: Optional[int] = None,
     ) -> List[ExpandedRelation]:
         """Recursively expand relations up to max_depth.
 
@@ -140,7 +183,9 @@ class RelationExpander:
         if visited is None:
             visited = set()
 
-        if concept_uri in visited or current_depth >= self.max_depth:
+        effective_max_depth = max_depth if max_depth is not None else self.max_depth
+
+        if concept_uri in visited or current_depth >= effective_max_depth:
             return []
 
         visited.add(concept_uri)
@@ -171,7 +216,7 @@ class RelationExpander:
             ))
 
             # Recursively expand from the related concept
-            if current_depth < self.max_depth - 1:
+            if current_depth < effective_max_depth - 1:
                 next_concept_uri = (
                     relation.target_uri
                     if relation.source_uri == concept_uri
@@ -181,7 +226,8 @@ class RelationExpander:
                 sub_relations = self._expand_relations_recursive(
                     db, next_concept_uri, relation_types,
                     current_depth + 1, visited.copy(),
-                    max_to_collect - len(expanded_relations) if max_to_collect else None
+                    max_to_collect - len(expanded_relations) if max_to_collect else None,
+                    max_depth=effective_max_depth,
                 )
                 expanded_relations.extend(sub_relations)
 
@@ -189,7 +235,8 @@ class RelationExpander:
 
     def _filter_and_rank_relations(
         self,
-        relations: List[ExpandedRelation]
+        relations: List[ExpandedRelation],
+        max_relations: Optional[int] = None,
     ) -> List[ExpandedRelation]:
         """Filter and rank relations by relevance.
 
@@ -219,12 +266,15 @@ class RelationExpander:
         unique_relations.sort(key=lambda x: (-x.relevance_score, x.depth))
 
         # Limit to max_relations
-        return unique_relations[:self.max_relations]
+        effective_max_relations = max_relations if max_relations is not None else self.max_relations
+        return unique_relations[:effective_max_relations]
 
     def expand_relations(
         self,
         concept: Concept,
-        intent: QueryIntent
+        intent: QueryIntent,
+        max_relations: Optional[int] = None,
+        max_depth: Optional[int] = None,
     ) -> RelationExpansionResult:
         """Expand relations for a concept based on query intent.
 
@@ -235,37 +285,41 @@ class RelationExpander:
         Returns:
             RelationExpansionResult with quote and relevant relations
         """
-        with self.SessionLocal() as db:
-            # Get relevant relation types for this intent
-            relation_types = self.INTENT_RELATION_MAPPING.get(intent, [])
+        relation_types = self.INTENT_RELATION_MAPPING.get(intent, [])
 
-            if not relation_types:
-                # Fallback to all relation types if intent not mapped
-                relation_types = list(RelationType)
+        if not relation_types:
+            relation_types = list(RelationType)
 
-            # Expand relations recursively
-            expanded_relations = self._expand_relations_recursive(
-                db, concept.uri, relation_types, max_to_collect=self.max_relations * 2  # Collect more for filtering
-            )
+        effective_max_relations = max_relations if max_relations is not None else self.max_relations
+        effective_max_depth = max_depth if max_depth is not None else self.max_depth
 
-            # Filter and rank
-            filtered_relations = self._filter_and_rank_relations(expanded_relations)
+        expanded_relations = self._expand_relations_recursive(
+            None,
+            concept.uri,
+            relation_types,
+            max_to_collect=effective_max_relations * 2,
+            max_depth=effective_max_depth,
+        )
+        filtered_relations = self._filter_and_rank_relations(
+            expanded_relations,
+            max_relations=effective_max_relations,
+        )
+        max_depth_reached = any(rel.depth >= effective_max_depth - 1 for rel in expanded_relations)
 
-            # Check if max depth was reached
-            max_depth_reached = any(rel.depth >= self.max_depth - 1 for rel in expanded_relations)
-
-            return RelationExpansionResult(
-                concept=concept,
-                quote=concept.quote,
-                relations=filtered_relations,
-                total_relations_found=len(expanded_relations),
-                max_depth_reached=max_depth_reached
-            )
+        return RelationExpansionResult(
+            concept=concept,
+            quote=concept.quote,
+            relations=filtered_relations,
+            total_relations_found=len(expanded_relations),
+            max_depth_reached=max_depth_reached
+        )
 
     def expand_relations_by_uri(
         self,
         concept_uri: str,
-        intent: QueryIntent
+        intent: QueryIntent,
+        max_relations: Optional[int] = None,
+        max_depth: Optional[int] = None,
     ) -> Optional[RelationExpansionResult]:
         """Expand relations for a concept URI.
 
@@ -276,12 +330,16 @@ class RelationExpander:
         Returns:
             RelationExpansionResult or None if concept not found
         """
-        with self.SessionLocal() as db:
-            concept = self._get_concept_by_uri(db, concept_uri)
-            if not concept:
-                return None
+        concept = self._get_concept_by_uri(None, concept_uri)
+        if not concept:
+            return None
 
-            return self.expand_relations(concept, intent)
+        return self.expand_relations(
+            concept,
+            intent,
+            max_relations=max_relations,
+            max_depth=max_depth,
+        )
 
 
 # Convenience functions

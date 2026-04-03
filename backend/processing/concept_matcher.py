@@ -1,10 +1,12 @@
 import logging
 import re
-from typing import List, Dict, Any, Optional
+import threading
+from collections import defaultdict
 from dataclasses import dataclass
-from sqlalchemy import select, text, func, or_
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import select
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
 
 from core.models import Concept, ConceptSynonym
 from processing.text_normalizer import ArabicNormalizer
@@ -28,7 +30,21 @@ class SearchCandidate:
 
     text: str
     priority: float
-    words: List[str]
+    words: tuple[str, ...]
+    word_set: frozenset[str]
+
+
+@dataclass(frozen=True)
+class IndexedTextEntry:
+    """Pre-normalized searchable text snippet tied to a concept."""
+
+    concept_uri: str
+    text: str
+    normalized_text: str
+    word_set: frozenset[str]
+    match_type: str
+    field_weight: float
+    threshold: float
 
 
 class ConceptMatcher:
@@ -50,13 +66,23 @@ class ConceptMatcher:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
-        self.engine = create_engine(database_url)
+        self.engine = create_engine(database_url, pool_pre_ping=True)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         self.text_normalizer = ArabicNormalizer()
         self._token_variant_cache: dict[str, set[str]] = {}
         self._token_signature_cache: dict[str, set[str]] = {}
         self._token_similarity_cache: dict[tuple[str, str], float] = {}
-        self._phrase_index_cache: Optional[list[tuple[str, set[str]]]] = None
+        self._index_lock = threading.Lock()
+        self._index_ready = False
+        self._concept_id_to_uri: dict[int, str] = {}
+        self._concepts_by_uri: dict[str, Concept] = {}
+        self._label_entries: list[IndexedTextEntry] = []
+        self._synonym_entries: list[IndexedTextEntry] = []
+        self._full_text_entries: list[IndexedTextEntry] = []
+        self._phrase_index_cache: list[tuple[str, set[str]]] = []
+        self._label_indexes = self._empty_entry_indexes()
+        self._synonym_indexes = self._empty_entry_indexes()
+        self._full_text_indexes = self._empty_entry_indexes()
 
         # Initialize embedding service if API key provided
         self.embedding_service = None
@@ -67,6 +93,167 @@ class ConceptMatcher:
                 self.embedding_service = EmbeddingService(openai_api_key, database_url, config)
             except Exception as exc:
                 logger.warning("Embedding service disabled: %s", exc)
+
+    def _empty_entry_indexes(self) -> dict[str, dict[str, set[int]]]:
+        return {
+            "exact": defaultdict(set),
+            "token": defaultdict(set),
+            "signature": defaultdict(set),
+        }
+
+    def _ensure_index_loaded(self) -> None:
+        if self._index_ready:
+            return
+        self.refresh_index()
+
+    def refresh_index(self) -> None:
+        """Reload all searchable concept data into memory."""
+        with self._index_lock:
+            with self.SessionLocal() as db:
+                concepts = db.execute(select(Concept)).scalars().all()
+                synonyms = db.execute(select(ConceptSynonym)).scalars().all()
+
+            concepts_by_uri = {concept.uri: concept for concept in concepts}
+            concept_id_to_uri = {concept.id: concept.uri for concept in concepts if concept.id is not None}
+            label_entries: list[IndexedTextEntry] = []
+            synonym_entries: list[IndexedTextEntry] = []
+            full_text_entries: list[IndexedTextEntry] = []
+            phrase_entries: list[tuple[str, set[str]]] = []
+            stop_words = self._question_stop_words()
+
+            for concept in concepts:
+                for label in concept.labels or []:
+                    exact_entry = self._build_index_entry(
+                        concept,
+                        label,
+                        match_type="exact_label",
+                        field_weight=1.0,
+                        threshold=0.58,
+                    )
+                    lexical_entry = self._build_index_entry(
+                        concept,
+                        label,
+                        match_type="lexical_label",
+                        field_weight=1.0,
+                        threshold=0.54,
+                    )
+                    if exact_entry:
+                        label_entries.append(exact_entry)
+                        phrase_entry = self._build_phrase_entry(exact_entry, stop_words)
+                        if phrase_entry:
+                            phrase_entries.append(phrase_entry)
+                    if lexical_entry:
+                        full_text_entries.append(lexical_entry)
+
+                for field_name, field_weight, threshold, match_type in (
+                    ("definition", 0.82, 0.46, "lexical_definition"),
+                    ("quote", 0.78, 0.46, "lexical_quote"),
+                    ("actions", 0.76, 0.46, "lexical_action"),
+                ):
+                    for value in getattr(concept, field_name, None) or []:
+                        entry = self._build_index_entry(
+                            concept,
+                            value,
+                            match_type=match_type,
+                            field_weight=field_weight,
+                            threshold=threshold,
+                        )
+                        if entry:
+                            full_text_entries.append(entry)
+
+            for synonym in synonyms:
+                concept_uri = None
+                if synonym.concept_id:
+                    concept_uri = concept_id_to_uri.get(synonym.concept_id)
+                if not concept_uri:
+                    concept_uri = synonym.subject_uri
+
+                concept = concepts_by_uri.get(concept_uri)
+                if not concept:
+                    continue
+
+                entry = self._build_index_entry(
+                    concept,
+                    synonym.object_value,
+                    match_type="synonym",
+                    field_weight=0.92,
+                    threshold=0.5,
+                )
+                if not entry:
+                    continue
+
+                synonym_entries.append(entry)
+                phrase_entry = self._build_phrase_entry(entry, stop_words)
+                if phrase_entry:
+                    phrase_entries.append(phrase_entry)
+
+            self._concept_id_to_uri = concept_id_to_uri
+            self._concepts_by_uri = concepts_by_uri
+            self._label_entries = label_entries
+            self._synonym_entries = synonym_entries
+            self._full_text_entries = full_text_entries
+            self._phrase_index_cache = phrase_entries
+            self._label_indexes = self._build_entry_indexes(label_entries)
+            self._synonym_indexes = self._build_entry_indexes(synonym_entries)
+            self._full_text_indexes = self._build_entry_indexes(full_text_entries)
+            self._index_ready = True
+
+        logger.info(
+            "Concept matcher index loaded: concepts=%s labels=%s synonyms=%s full_text=%s",
+            len(self._concepts_by_uri),
+            len(self._label_entries),
+            len(self._synonym_entries),
+            len(self._full_text_entries),
+        )
+
+    def _build_index_entry(
+        self,
+        concept: Concept,
+        text_value: Optional[str],
+        match_type: str,
+        field_weight: float,
+        threshold: float,
+    ) -> Optional[IndexedTextEntry]:
+        cleaned = (text_value or "").strip()
+        normalized = self._normalize_search_term(cleaned)
+        if not normalized:
+            return None
+
+        return IndexedTextEntry(
+            concept_uri=concept.uri,
+            text=cleaned,
+            normalized_text=normalized,
+            word_set=frozenset(re.findall(r"\w+", normalized)),
+            match_type=match_type,
+            field_weight=field_weight,
+            threshold=threshold,
+        )
+
+    def _build_phrase_entry(
+        self,
+        entry: IndexedTextEntry,
+        stop_words: set[str],
+    ) -> Optional[tuple[str, set[str]]]:
+        phrase_words = {
+            word for word in entry.word_set
+            if len(word) > 1 and word not in stop_words
+        }
+        if not phrase_words or len(phrase_words) > 5:
+            return None
+        return entry.text, phrase_words
+
+    def _build_entry_indexes(
+        self,
+        entries: list[IndexedTextEntry],
+    ) -> dict[str, dict[str, set[int]]]:
+        indexes = self._empty_entry_indexes()
+        for entry_index, entry in enumerate(entries):
+            indexes["exact"][entry.normalized_text].add(entry_index)
+            for word in entry.word_set:
+                indexes["token"][word].add(entry_index)
+                for signature in self._token_signatures(word):
+                    indexes["signature"][signature].add(entry_index)
+        return indexes
 
     def _normalize_search_term(self, term: str) -> str:
         """Normalize search term for matching."""
@@ -176,7 +363,8 @@ class ConceptMatcher:
                 SearchCandidate(
                     text=cleaned,
                     priority=max(0.35, min(priority, 1.0)),
-                    words=words or re.findall(r"\w+", cleaned),
+                    words=tuple(words or re.findall(r"\w+", cleaned)),
+                    word_set=frozenset(words or re.findall(r"\w+", cleaned)),
                 )
             )
 
@@ -206,39 +394,9 @@ class ConceptMatcher:
         return candidates
 
     def _phrase_index(self, stop_words: set[str]) -> list[tuple[str, set[str]]]:
-        if self._phrase_index_cache is not None:
-            return self._phrase_index_cache
-
-        phrases: list[str] = []
-        with self.SessionLocal() as db:
-            for concept in db.execute(select(Concept).where(Concept.labels.isnot(None))).scalars().all():
-                phrases.extend([label for label in (concept.labels or []) if (label or "").strip()])
-
-            phrases.extend(
-                synonym.object_value
-                for synonym in db.execute(select(ConceptSynonym)).scalars().all()
-                if (synonym.object_value or "").strip()
-            )
-
-        indexed: list[tuple[str, set[str]]] = []
-        seen: set[str] = set()
-        for phrase in phrases:
-            normalized_phrase = self._normalize_search_term(phrase)
-            if not normalized_phrase or normalized_phrase in seen:
-                continue
-
-            words = {
-                word for word in re.findall(r"\w+", normalized_phrase)
-                if len(word) > 1 and word not in stop_words
-            }
-            if not words or len(words) > 5:
-                continue
-
-            seen.add(normalized_phrase)
-            indexed.append((phrase, words))
-
-        self._phrase_index_cache = indexed
-        return indexed
+        del stop_words
+        self._ensure_index_loaded()
+        return self._phrase_index_cache
 
     def _add_local_phrase_expansions(
         self,
@@ -293,7 +451,8 @@ class ConceptMatcher:
                 SearchCandidate(
                     text=cleaned,
                     priority=max(0.35, min(priority, 1.0)),
-                    words=words or re.findall(r"\w+", cleaned),
+                    words=tuple(words or re.findall(r"\w+", cleaned)),
+                    word_set=frozenset(words or re.findall(r"\w+", cleaned)),
                 )
             )
 
@@ -308,15 +467,11 @@ class ConceptMatcher:
         """Compatibility helper returning only candidate texts."""
         return [candidate.text for candidate in self._build_search_candidates(search_term)]
 
-    def _score_text_against_candidate(self, text_value: str, candidate: SearchCandidate) -> float:
-        normalized_text = self._normalize_search_term(text_value)
-        if not normalized_text:
-            return 0.0
-
-        candidate_words = set(candidate.words)
-        text_words = set(re.findall(r"\w+", normalized_text))
-        exact_phrase = normalized_text == candidate.text
-        substring = candidate.text in normalized_text or normalized_text in candidate.text
+    def _score_entry_against_candidate(self, entry: IndexedTextEntry, candidate: SearchCandidate) -> float:
+        candidate_words = set(candidate.word_set)
+        text_words = set(entry.word_set)
+        exact_phrase = entry.normalized_text == candidate.text
+        substring = candidate.text in entry.normalized_text or entry.normalized_text in candidate.text
         overlap = len(candidate_words.intersection(text_words))
         fuzzy_overlap = self._fuzzy_overlap_score(candidate_words, text_words)
 
@@ -344,7 +499,7 @@ class ConceptMatcher:
         candidate_word_count = max(len(candidate_words), 1)
         text_word_count = max(len(text_words), 1)
         overflow = text_word_count - candidate_word_count
-        if overflow > 0 and normalized_text != candidate.text:
+        if overflow > 0 and entry.normalized_text != candidate.text:
             if candidate_word_count == 1:
                 base_score -= min(0.32, overflow * 0.09)
             elif candidate_word_count == 2:
@@ -463,158 +618,75 @@ class ConceptMatcher:
 
         return score
 
-    def _exact_label_match(self, db: Session, search_candidates: List[SearchCandidate]) -> List[ConceptMatch]:
-        """Search for exact label matches.
+    def _collect_entry_indices(
+        self,
+        indexes: dict[str, dict[str, set[int]]],
+        search_candidate: SearchCandidate,
+    ) -> set[int]:
+        matched_indices = set(indexes["exact"].get(search_candidate.text, set()))
+        for word in search_candidate.word_set:
+            for variant in self._token_variants(word):
+                matched_indices.update(indexes["token"].get(variant, set()))
+            for signature in self._token_signatures(word):
+                matched_indices.update(indexes["signature"].get(signature, set()))
+        return matched_indices
 
-        Args:
-            db: Database session
-            search_candidates: Ranked search candidates
+    def _match_entries(
+        self,
+        entries: list[IndexedTextEntry],
+        indexes: dict[str, dict[str, set[int]]],
+        search_candidates: List[SearchCandidate],
+        require_exact_single_word: bool = False,
+    ) -> List[ConceptMatch]:
+        best_matches: dict[str, ConceptMatch] = {}
 
-        Returns:
-            List of concept matches
-        """
-        matches = []
-        seen_uris = set()
-        concepts = db.execute(select(Concept).where(Concept.labels.isnot(None))).scalars().all()
-
-        for concept in concepts:
-            best_match: Optional[ConceptMatch] = None
-
-            for label in concept.labels or []:
-                normalized_label = self._normalize_search_term(label or "")
-                if not normalized_label:
+        for search_candidate in search_candidates:
+            for entry_index in self._collect_entry_indices(indexes, search_candidate):
+                entry = entries[entry_index]
+                if require_exact_single_word and len(search_candidate.words) < 2 and entry.normalized_text != search_candidate.text:
                     continue
 
-                for search_candidate in search_candidates:
-                    if len(search_candidate.words) < 2 and normalized_label != search_candidate.text:
-                        continue
+                concept = self._concepts_by_uri.get(entry.concept_uri)
+                if not concept:
+                    continue
 
-                    match_confidence = self._score_text_against_candidate(label, search_candidate)
-                    if match_confidence < 0.58:
-                        continue
+                weighted_score = self._score_entry_against_candidate(entry, search_candidate) * entry.field_weight
+                if weighted_score < entry.threshold:
+                    continue
 
-                    candidate_match = ConceptMatch(
-                        concept=concept,
-                        confidence=match_confidence,
-                        match_type="exact_label",
-                        matched_text=label,
-                    )
-                    if not best_match or candidate_match.confidence > best_match.confidence:
-                        best_match = candidate_match
-
-            if best_match and concept.uri not in seen_uris:
-                seen_uris.add(concept.uri)
-                matches.append(best_match)
-
-        return matches
-
-    def _synonym_match(self, db: Session, search_candidates: List[SearchCandidate]) -> List[ConceptMatch]:
-        """Search for synonym matches.
-
-        Args:
-            db: Database session
-            search_candidates: Ranked search candidates
-
-        Returns:
-            List of concept matches
-        """
-        matches = []
-        seen_uris = set()
-        synonyms = db.execute(select(ConceptSynonym)).scalars().all()
-
-        for synonym in synonyms:
-            normalized_synonym = self._normalize_search_term(synonym.object_value or "")
-            if not normalized_synonym:
-                continue
-
-            best_confidence = 0.0
-
-            for search_candidate in search_candidates:
-                best_confidence = max(
-                    best_confidence,
-                    self._score_text_against_candidate(synonym.object_value, search_candidate) * 0.92,
+                candidate_match = ConceptMatch(
+                    concept=concept,
+                    confidence=weighted_score,
+                    match_type=entry.match_type,
+                    matched_text=entry.text,
                 )
+                current_match = best_matches.get(concept.uri)
+                if not current_match or candidate_match.confidence > current_match.confidence:
+                    best_matches[concept.uri] = candidate_match
 
-            if best_confidence < 0.5:
-                continue
+        return list(best_matches.values())
 
-            if synonym.concept_id:
-                concept = db.get(Concept, synonym.concept_id)
-            else:
-                stmt = select(Concept).where(Concept.uri == synonym.subject_uri)
-                concept = db.execute(stmt).scalar_one_or_none()
+    def _exact_label_match(self, search_candidates: List[SearchCandidate]) -> List[ConceptMatch]:
+        return self._match_entries(
+            self._label_entries,
+            self._label_indexes,
+            search_candidates,
+            require_exact_single_word=True,
+        )
 
-            if not concept or concept.uri in seen_uris:
-                continue
+    def _synonym_match(self, search_candidates: List[SearchCandidate]) -> List[ConceptMatch]:
+        return self._match_entries(
+            self._synonym_entries,
+            self._synonym_indexes,
+            search_candidates,
+        )
 
-            seen_uris.add(concept.uri)
-            matches.append(ConceptMatch(
-                concept=concept,
-                confidence=best_confidence,
-                match_type="synonym",
-                matched_text=synonym.object_value
-            ))
-
-        return matches
-
-    def _full_text_search(self, db: Session, search_candidates: List[SearchCandidate]) -> List[ConceptMatch]:
-        """Search concepts lexically across labels, definitions, quotes, and actions.
-
-        Args:
-            db: Database session
-            search_candidates: Ranked search candidates
-
-        Returns:
-            List of concept matches
-        """
-        matches = []
-        concepts = db.execute(select(Concept)).scalars().all()
-        field_weights = {
-            "labels": 1.0,
-            "definition": 0.82,
-            "quote": 0.78,
-            "actions": 0.76,
-        }
-        match_types = {
-            "labels": "lexical_label",
-            "definition": "lexical_definition",
-            "quote": "lexical_quote",
-            "actions": "lexical_action",
-        }
-
-        for concept in concepts:
-            best_match: Optional[ConceptMatch] = None
-
-            for field_name, field_weight in field_weights.items():
-                values = getattr(concept, field_name, None) or []
-                for value in values:
-                    normalized_value = self._normalize_search_term(value or "")
-                    if not normalized_value:
-                        continue
-
-                    for search_candidate in search_candidates:
-                        match_score = self._score_text_against_candidate(value, search_candidate)
-                        if match_score == 0.0:
-                            continue
-
-                        weighted_score = match_score * field_weight
-                        threshold = 0.54 if field_name == "labels" else 0.46
-                        if weighted_score < threshold:
-                            continue
-
-                        candidate_match = ConceptMatch(
-                            concept=concept,
-                            confidence=weighted_score,
-                            match_type=match_types[field_name],
-                            matched_text=value,
-                        )
-                        if not best_match or candidate_match.confidence > best_match.confidence:
-                            best_match = candidate_match
-
-            if best_match:
-                matches.append(best_match)
-
-        return matches
+    def _full_text_search(self, search_candidates: List[SearchCandidate]) -> List[ConceptMatch]:
+        return self._match_entries(
+            self._full_text_entries,
+            self._full_text_indexes,
+            search_candidates,
+        )
 
     def _vector_similarity_search(
         self,
@@ -806,50 +878,50 @@ class ConceptMatcher:
         if not search_term or not search_term.strip():
             return []
 
-        with self.SessionLocal() as db:
-            def run_search(
-                search_candidates: List[SearchCandidate],
-                include_full_text: bool = True,
-            ) -> List[ConceptMatch]:
-                all_matches: List[ConceptMatch] = []
+        self._ensure_index_loaded()
 
-                exact_matches = self._exact_label_match(db, search_candidates)
-                all_matches.extend(exact_matches)
+        def run_search(
+            search_candidates: List[SearchCandidate],
+            include_full_text: bool = True,
+        ) -> List[ConceptMatch]:
+            all_matches: List[ConceptMatch] = []
 
-                synonym_matches = self._synonym_match(db, search_candidates)
-                all_matches.extend(synonym_matches)
+            all_matches.extend(self._exact_label_match(search_candidates))
+            all_matches.extend(self._synonym_match(search_candidates))
 
-                if include_full_text:
-                    fts_matches = self._full_text_search(db, search_candidates)
-                    all_matches.extend(fts_matches)
+            if include_full_text:
+                all_matches.extend(self._full_text_search(search_candidates))
 
-                if use_vector:
-                    vector_matches = self._vector_similarity_search(db, search_term)
-                    all_matches.extend(vector_matches)
+            if use_vector and self.embedding_service:
+                with self.SessionLocal() as db:
+                    all_matches.extend(self._vector_similarity_search(db, search_term))
 
-                return self._combine_and_rank_matches(all_matches)
+            return self._combine_and_rank_matches(all_matches)
 
-            search_candidates = self._build_search_candidates(search_term)
-            ranked_matches = run_search(search_candidates)
+        search_candidates = self._build_search_candidates(search_term)
+        ranked_matches = run_search(search_candidates)
 
-            should_try_phrase_expansion = (
-                not ranked_matches
-                or ranked_matches[0].confidence < 1.0
+        should_try_phrase_expansion = (
+            not ranked_matches
+            or (
+                ranked_matches[0].match_type not in {"exact_label", "synonym"}
+                and ranked_matches[0].confidence < 0.95
             )
-            if should_try_phrase_expansion:
-                expanded_candidates = self._with_local_phrase_expansions(search_candidates)
-                if [candidate.text for candidate in expanded_candidates] != [candidate.text for candidate in search_candidates]:
-                    expanded_matches = run_search(expanded_candidates, include_full_text=False)
-                    if not expanded_matches:
-                        expanded_matches = run_search(expanded_candidates, include_full_text=True)
-                    if expanded_matches and (
-                        not ranked_matches
-                        or expanded_matches[0].confidence > ranked_matches[0].confidence
-                    ):
-                        ranked_matches = expanded_matches
+        )
+        if should_try_phrase_expansion:
+            expanded_candidates = self._with_local_phrase_expansions(search_candidates)
+            if [candidate.text for candidate in expanded_candidates] != [candidate.text for candidate in search_candidates]:
+                expanded_matches = run_search(expanded_candidates, include_full_text=False)
+                if not expanded_matches:
+                    expanded_matches = run_search(expanded_candidates, include_full_text=True)
+                if expanded_matches and (
+                    not ranked_matches
+                    or expanded_matches[0].confidence > ranked_matches[0].confidence
+                ):
+                    ranked_matches = expanded_matches
 
-            logger.info(f"Found {len(ranked_matches)} concept matches for '{search_term}'")
-            return ranked_matches
+        logger.info("Found %s concept matches for '%s'", len(ranked_matches), search_term)
+        return ranked_matches
 
 
 # Convenience functions

@@ -159,6 +159,23 @@ class AnswerValidationUnitTests(unittest.TestCase):
         self.assertTrue(validation.is_valid)
         composer.compose_answer.assert_called()
 
+    def test_validator_skips_regeneration_when_attempts_disabled(self) -> None:
+        validator = AnswerValidator(max_regeneration_attempts=0)
+        composer = Mock()
+
+        final_answer, validation = validator.validate_and_regenerate(
+            answer="القرآن هو فلسفة بشرية محضة.",
+            intent=QueryIntent.DEFINITION,
+            question="ما هو القرآن؟",
+            concept_match=self.concept_match,
+            relation_result=None,
+            answer_composer=composer,
+        )
+
+        self.assertEqual(final_answer, "القرآن هو فلسفة بشرية محضة.")
+        self.assertFalse(validation.is_valid)
+        composer.compose_answer.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
