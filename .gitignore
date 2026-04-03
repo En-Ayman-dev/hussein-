@@ -1,0 +1,31 @@
+# Root project
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+server.log
+
+# Local temporary folders
+hussein/
+.frontend-git-backup/
+
+# Backend
+backend/.env
+backend/.venv310/
+backend/venv/
+backend/__pycache__/
+backend/**/*.pyc
+backend/.pytest_cache/
+
+# Frontend
+frontend/.env*
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/coverage/
+frontend/.vercel/
+frontend/*.tsbuildinfo
+
