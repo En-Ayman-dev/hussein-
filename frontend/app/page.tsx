@@ -496,10 +496,11 @@ function pickPrimaryConcept(concepts: ApiConcept[]): ApiConcept | null {
 }
 
 function buildPresentation(response: ChatApiResponse, question: string): PresentationModel {
+  const cleanedAnswer = sanitizeText(response.answer || "");
   if (response.top_concepts.length === 0) {
     return {
       insight: null,
-      message: sanitizeText(response.answer || "لم أجد نتيجة مناسبة لهذا السؤال في البيانات الحالية."),
+      message: cleanedAnswer || "لم أجد نتيجة مناسبة لهذا السؤال في البيانات الحالية.",
     };
   }
 
@@ -532,51 +533,53 @@ function buildPresentation(response: ChatApiResponse, question: string): Present
     ...response.top_quotes,
     ...(primaryConcept ? primaryConcept.quote : []),
   ]).slice(0, 4);
-  const cleanedAnswer = sanitizeText(response.answer || "");
   const summary =
     (isAnswerHelpful(cleanedAnswer)
       ? extractSummaryCandidate(cleanedAnswer, question, primaryLabel)
       : null) ||
     buildFallbackSummary(primaryDefinition, relatedTerms, relationItems, primaryActions);
 
-  const sections: string[] = [];
+  const fallbackSections: string[] = [];
   if (primaryLabel) {
-    sections.push(`**${primaryLabel}**`);
+    fallbackSections.push(`**${primaryLabel}**`);
   }
 
   if (summary) {
-    sections.push(`**الخلاصة:**\n${summary}`);
+    fallbackSections.push(`**الخلاصة:**\n${summary}`);
   }
 
   if (primaryDefinition) {
-    sections.push(`**التعريف:**\n• ${primaryDefinition}`);
+    fallbackSections.push(`**التعريف:**\n• ${primaryDefinition}`);
   }
 
   if (primaryActions.length > 0) {
-    sections.push(
+    fallbackSections.push(
       `**المطلوب عملياً:**\n${primaryActions.map((action) => `• ${action}`).join("\n")}`,
     );
   }
 
   if (relatedTerms.length > 0) {
-    sections.push(
+    fallbackSections.push(
       `**المصطلحات ذات الصلة:**\n${relatedTerms.map((term) => `• ${term}`).join("\n")}`,
     );
   }
 
   if (relationItems.length > 0) {
-    sections.push(
+    fallbackSections.push(
       `**روابط مهمة:**\n${relationItems.map((item) => `• ${item}`).join("\n")}`,
     );
   }
 
   if (quotes.length > 0) {
-    sections.push(`**اقتباسات مؤسسة:**\n${quotes.map((quote) => `> ${quote}`).join("\n\n")}`);
+    fallbackSections.push(`**اقتباسات مؤسسة:**\n${quotes.map((quote) => `> ${quote}`).join("\n\n")}`);
   }
 
-  if (sections.length === 0) {
-    sections.push(cleanedAnswer || "تعذر تكوين عرض مناسب من البيانات المتاحة حالياً.");
+  if (fallbackSections.length === 0) {
+    fallbackSections.push(cleanedAnswer || "تعذر تكوين عرض مناسب من البيانات المتاحة حالياً.");
   }
+
+  const fallbackMessage = fallbackSections.join("\n\n");
+  const shouldShowAnswerDirectly = isAnswerHelpful(cleanedAnswer);
 
   return {
     insight: {
@@ -588,7 +591,7 @@ function buildPresentation(response: ChatApiResponse, question: string): Present
       summary,
       title: primaryLabel,
     },
-    message: sections.join("\n\n"),
+    message: shouldShowAnswerDirectly ? cleanedAnswer : fallbackMessage,
   };
 }
 
