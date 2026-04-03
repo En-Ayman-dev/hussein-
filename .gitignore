@@ -10,6 +10,7 @@ server.log
 # Local temporary folders
 hussein/
 .frontend-git-backup/
+output/
 
 # Backend
 backend/.env

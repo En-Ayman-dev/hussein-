@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from fastapi.testclient import TestClient
 
@@ -191,6 +191,33 @@ class ApiIntegrationTests(unittest.TestCase):
 
         self.assertIsNotNone(cached)
         self.assertEqual(cached["mode"], "without_ai")
+
+    def test_ai_relation_context_falls_back_to_definition_when_intent_is_sparse(self) -> None:
+        concept = SimpleNamespace(uri="concept:quran")
+        empty_solution = SimpleNamespace(relations=[])
+        richer_definition = SimpleNamespace(relations=[SimpleNamespace(id=1), SimpleNamespace(id=2)])
+
+        with patch.object(
+            main.relation_expander,
+            "expand_relations",
+            side_effect=[empty_solution, richer_definition],
+        ) as mocked_expand:
+            result = main._expand_relation_context(
+                concept,
+                main.QueryIntent.SOLUTION,
+                8,
+                2,
+                use_ai=True,
+            )
+
+        self.assertIs(result, richer_definition)
+        self.assertEqual(
+            mocked_expand.call_args_list,
+            [
+                call(concept, main.QueryIntent.SOLUTION, max_relations=8, max_depth=2),
+                call(concept, main.QueryIntent.DEFINITION, max_relations=8, max_depth=2),
+            ],
+        )
 
     def test_reindex_endpoint_uses_expanded_summary_shape(self) -> None:
         summary = {

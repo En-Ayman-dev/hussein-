@@ -41,7 +41,7 @@ from app.security import (
     sanitize_question,
 )
 from processing.concept_matcher import ConceptMatcher
-from processing.query_analyzer import QueryAnalyzer
+from processing.query_analyzer import QueryAnalyzer, QueryIntent
 from processing.relation_expander import RelationExpander
 from processing.runtime_ontology_cache import get_runtime_ontology_snapshot, set_runtime_ontology_snapshot
 from processing.ttl_parser import parse_ttl
@@ -405,6 +405,43 @@ def _prepare_relation_details(relation_result: Any) -> list[Dict[str, Any]]:
 
 def _prepare_relation_summaries(relation_result: Any) -> list[str]:
     return [detail["summary"] for detail in _prepare_relation_details(relation_result)]
+
+
+def _expand_relation_context(
+    concept: Any,
+    intent: Any,
+    max_relations: int,
+    max_depth: int,
+    *,
+    use_ai: bool,
+) -> Any:
+    primary_result = relation_expander.expand_relations(
+        concept,
+        intent,
+        max_relations=max_relations,
+        max_depth=max_depth,
+    )
+
+    if not use_ai or primary_result.relations or intent == QueryIntent.DEFINITION:
+        return primary_result
+
+    fallback_result = relation_expander.expand_relations(
+        concept,
+        QueryIntent.DEFINITION,
+        max_relations=max_relations,
+        max_depth=max_depth,
+    )
+
+    if fallback_result.relations:
+        logger.info(
+            "Expanded AI relation context with definition fallback: concept=%s original_intent=%s fallback_relations=%s",
+            getattr(concept, "uri", None),
+            getattr(intent, "value", str(intent)),
+            len(fallback_result.relations),
+        )
+        return fallback_result
+
+    return primary_result
 
 
 def _build_no_match_response(intent: str, start_time: float, mode: str) -> Dict[str, Any]:
@@ -906,11 +943,12 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
 
         selected_concept = unique_concepts[0]
         relations_started_at = time.perf_counter()
-        relation_result = relation_expander.expand_relations(
+        relation_result = _expand_relation_context(
             selected_concept.concept,
             query_analysis.intent,
-            max_relations=normalized_request.max_relations,
-            max_depth=normalized_request.max_depth,
+            normalized_request.max_relations,
+            normalized_request.max_depth,
+            use_ai=use_ai,
         )
         _record_stage("expand_relations", relations_started_at)
 

@@ -11,8 +11,9 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from generation.answer_validator import AnswerValidator
+from generation.answer_composer import AnswerComposer
 from processing.concept_matcher import ConceptMatch
-from processing.query_analyzer import QueryIntent
+from processing.query_analyzer import QueryIntent, QueryAnalysis
 from processing.relation_expander import ExpandedRelation, RelationExpander
 
 
@@ -175,6 +176,76 @@ class AnswerValidationUnitTests(unittest.TestCase):
         self.assertEqual(final_answer, "القرآن هو فلسفة بشرية محضة.")
         self.assertFalse(validation.is_valid)
         composer.compose_answer.assert_not_called()
+
+
+class AnswerComposerUnitTests(unittest.TestCase):
+    def test_prepare_llm_context_includes_rich_supporting_evidence(self) -> None:
+        composer = AnswerComposer(openai_api_key=None)
+        primary = ConceptMatch(
+            concept=build_concept(
+                "concept:quran",
+                ["القرآن"],
+                definition=["كتاب الله المنزل على نبيه محمد."],
+                quote=["كتاب الله المنزل على نبيه محمد."],
+                actions=["الرجوع إليه في بناء الوعي."],
+                importance=["رئيسي"],
+            ),
+            confidence=0.95,
+            match_type="exact_label",
+            matched_text="القرآن",
+        )
+        supporting = [
+            ConceptMatch(
+                concept=build_concept(
+                    "concept:ayat",
+                    ["آيات الله"],
+                    definition=["حقائق إلهية هادية في مختلف مجالات الحياة."],
+                    quote=["هي أعلام على حقائق من الهدى."],
+                    actions=["التعامل معها كمصدر للمعرفة والهداية."],
+                    importance=["رئيسي"],
+                ),
+                confidence=0.88,
+                match_type="synonym",
+                matched_text="آيات الله",
+            ),
+            ConceptMatch(
+                concept=build_concept(
+                    "concept:tadlil",
+                    ["التضليل"],
+                    definition=["إخفاء الحقائق وتزييفها لصرف الأمة عن أهدافها."],
+                    quote=["من التضليل الشديد الذي يجيده اليهود."],
+                    actions=["كشفه وفضحه وعدم التسليم له."],
+                    importance=["رئيسي"],
+                ),
+                confidence=0.84,
+                match_type="exact_label",
+                matched_text="التضليل",
+            ),
+        ]
+
+        context = composer._prepare_llm_context(
+            QueryIntent.SOLUTION,
+            "كيف يبني القرآن وعي الأمة في مواجهة التضليل؟",
+            primary,
+            None,
+            QueryAnalysis(
+                intent=QueryIntent.SOLUTION,
+                confidence=1.0,
+                keywords=["كيف", "القرآن", "وعي", "الأمة", "التضليل"],
+                method="rules",
+                query="كيف يبني القرآن وعي الأمة في مواجهة التضليل؟",
+            ),
+            supporting_matches=supporting,
+        )
+
+        self.assertIn("context_evidence", context)
+        self.assertGreaterEqual(len(context["context_evidence"]["quotes"]), 3)
+        self.assertGreaterEqual(len(context["context_evidence"]["definitions"]), 3)
+        self.assertGreaterEqual(len(context["context_evidence"]["actions"]), 3)
+        self.assertEqual(len(context["supporting_concepts"]), 2)
+        self.assertIn("role_hint", context["supporting_concepts"][0])
+        self.assertIn("foundational_quote", context["supporting_concepts"][0])
+        self.assertIn("actions", context["supporting_concepts"][0])
 
 
 if __name__ == "__main__":

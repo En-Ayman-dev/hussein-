@@ -37,6 +37,13 @@ class AnswerComposer:
     MAX_RELATIONS = 6
     MAX_ACTIONS = 3
     MAX_TEXT_LENGTH = 280
+    MAX_MATCH_TEXT_LENGTH = 180
+    MAX_DEFINITION_LENGTH = 320
+    MAX_QUOTE_LENGTH = 420
+    MAX_ACTION_LENGTH = 220
+    MAX_EVIDENCE_QUOTES = 6
+    MAX_EVIDENCE_DEFINITIONS = 6
+    MAX_EVIDENCE_ACTIONS = 6
 
     def __init__(
         self,
@@ -181,14 +188,17 @@ class AnswerComposer:
             concept_definitions = self._truncate_text_list(
                 _clean_text_list(concept_match.concept.definition),
                 limit=2,
+                max_length=self.MAX_DEFINITION_LENGTH,
             )
             concept_quotes = self._truncate_text_list(
                 _clean_text_list(concept_match.concept.quote),
                 limit=self.MAX_QUOTES,
+                max_length=self.MAX_QUOTE_LENGTH,
             )
             concept_actions = self._truncate_text_list(
                 _clean_text_list(concept_match.concept.actions),
                 limit=self.MAX_ACTIONS,
+                max_length=self.MAX_ACTION_LENGTH,
             )
             concept_importance = self._truncate_text_list(
                 _clean_text_list(concept_match.concept.importance),
@@ -203,8 +213,16 @@ class AnswerComposer:
                 "importance": concept_importance,
                 "match_confidence": concept_match.confidence,
                 "match_type": concept_match.match_type,
-                "matched_text": self._truncate_text(concept_match.matched_text),
+                "matched_text": self._truncate_text(
+                    concept_match.matched_text,
+                    max_length=self.MAX_MATCH_TEXT_LENGTH,
+                ),
             }
+
+        context["context_evidence"] = self._build_context_evidence(
+            concept_match,
+            supporting_matches,
+        )
 
         if supporting_matches:
             context["supporting_concepts"] = self._prepare_supporting_concepts(
@@ -259,21 +277,90 @@ class AnswerComposer:
 
         return context
 
-    def _truncate_text(self, value: Optional[str]) -> Optional[str]:
+    def _truncate_text(self, value: Optional[str], max_length: Optional[int] = None) -> Optional[str]:
         if value is None:
             return None
         cleaned = str(value).strip()
-        if len(cleaned) <= self.MAX_TEXT_LENGTH:
+        effective_max_length = max_length if max_length is not None else self.MAX_TEXT_LENGTH
+        if len(cleaned) <= effective_max_length:
             return cleaned
-        return cleaned[: self.MAX_TEXT_LENGTH].rstrip() + "..."
+        return cleaned[:effective_max_length].rstrip() + "..."
 
-    def _truncate_text_list(self, values: list[str], limit: int) -> list[str]:
+    def _truncate_text_list(
+        self,
+        values: list[str],
+        limit: int,
+        max_length: Optional[int] = None,
+    ) -> list[str]:
         truncated: list[str] = []
         for value in values[:limit]:
-            cleaned = self._truncate_text(value)
+            cleaned = self._truncate_text(value, max_length=max_length)
             if cleaned:
                 truncated.append(cleaned)
         return truncated
+
+    def _clean_primary_label(self, match: ConceptMatch) -> Optional[str]:
+        labels = _clean_text_list(match.concept.labels)
+        return labels[0] if labels else None
+
+    def _infer_supporting_role(self, match: ConceptMatch) -> str:
+        support_text = " ".join(
+            _clean_text_list(match.concept.labels)
+            + _clean_text_list(match.concept.definition)
+            + _clean_text_list(match.concept.actions)
+        )
+
+        if any(token in support_text for token in ["التضليل", "اليهود", "العدو", "خبث", "المنافق"]):
+            return "يوضح جهة التضليل أو العدو في السؤال"
+        if any(token in support_text for token in ["آيات", "الهدى", "الهداية", "البصيرة", "الوعي", "القرآن"]):
+            return "يوضح وسيلة البناء والهداية في السؤال"
+        if any(token in support_text for token in ["الأمة", "الناس", "المجتمع"]):
+            return "يوضح ساحة المسؤولية الجماعية"
+        return "مفهوم مساند يوضح جزءاً من الجواب"
+
+    def _build_context_evidence(
+        self,
+        concept_match: Optional[ConceptMatch],
+        supporting_matches: Optional[list[ConceptMatch]],
+    ) -> Dict[str, list[Dict[str, str]]]:
+        evidence = {
+            "quotes": [],
+            "definitions": [],
+            "actions": [],
+        }
+
+        def add_items(bucket: str, label: Optional[str], values: list[str], limit: int) -> None:
+            if not label:
+                return
+            max_length = {
+                "quotes": self.MAX_QUOTE_LENGTH,
+                "definitions": self.MAX_DEFINITION_LENGTH,
+                "actions": self.MAX_ACTION_LENGTH,
+            }.get(bucket, self.MAX_TEXT_LENGTH)
+
+            for value in self._truncate_text_list(
+                _clean_text_list(values),
+                limit=limit,
+                max_length=max_length,
+            ):
+                evidence[bucket].append({"label": label, "text": value})
+
+        if concept_match:
+            primary_label = self._clean_primary_label(concept_match)
+            add_items("quotes", primary_label, concept_match.concept.quote or [], limit=2)
+            add_items("definitions", primary_label, concept_match.concept.definition or [], limit=2)
+            add_items("actions", primary_label, concept_match.concept.actions or [], limit=2)
+
+        for match in supporting_matches or []:
+            label = self._clean_primary_label(match)
+            add_items("quotes", label, match.concept.quote or [], limit=2)
+            add_items("definitions", label, match.concept.definition or [], limit=2)
+            add_items("actions", label, match.concept.actions or [], limit=2)
+
+        evidence["quotes"] = evidence["quotes"][: self.MAX_EVIDENCE_QUOTES]
+        evidence["definitions"] = evidence["definitions"][: self.MAX_EVIDENCE_DEFINITIONS]
+        evidence["actions"] = evidence["actions"][: self.MAX_EVIDENCE_ACTIONS]
+        return evidence
 
     def _prepare_supporting_concepts(
         self,
@@ -300,7 +387,18 @@ class AnswerComposer:
                     "labels": labels,
                     "definition": self._truncate_text_list(
                         _clean_text_list(match.concept.definition),
-                        limit=1,
+                        limit=2,
+                        max_length=self.MAX_DEFINITION_LENGTH,
+                    ),
+                    "foundational_quote": self._truncate_text_list(
+                        _clean_text_list(match.concept.quote),
+                        limit=2,
+                        max_length=self.MAX_QUOTE_LENGTH,
+                    ),
+                    "actions": self._truncate_text_list(
+                        _clean_text_list(match.concept.actions),
+                        limit=2,
+                        max_length=self.MAX_ACTION_LENGTH,
                     ),
                     "importance": self._truncate_text_list(
                         _clean_text_list(match.concept.importance),
@@ -308,6 +406,7 @@ class AnswerComposer:
                     ),
                     "match_confidence": match.confidence,
                     "match_type": match.match_type,
+                    "role_hint": self._infer_supporting_role(match),
                 }
             )
 
@@ -379,9 +478,12 @@ class AnswerComposer:
                 supporting_matches,
             )
             logger.info(
-                "LLM context budget prepared: supporting=%s relations=%s",
+                "LLM context budget prepared: supporting=%s relations=%s evidence_quotes=%s evidence_definitions=%s evidence_actions=%s",
                 len(context.get("supporting_concepts", [])),
                 len(context.get("relations", [])),
+                len(context.get("context_evidence", {}).get("quotes", [])),
+                len(context.get("context_evidence", {}).get("definitions", [])),
+                len(context.get("context_evidence", {}).get("actions", [])),
             )
             fallback_answer = self.template_generator.generate_answer(
                 query_analysis, concept_match, relation_result
