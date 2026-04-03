@@ -54,6 +54,8 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/ontology_db")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
+CORS_ALLOWED_ORIGIN_REGEX = os.getenv("CORS_ALLOWED_ORIGIN_REGEX")
 CACHE_TTL_SECONDS = 3600
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
 MAX_QUESTION_LENGTH = 500
@@ -121,6 +123,15 @@ if OPENAI_API_KEY:
         )
     except Exception as exc:
         logger.warning("Embedding service disabled at startup: %s", exc)
+
+
+def _parse_cors_allowed_origins(raw_value: str) -> list[str]:
+    default_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+    configured_origins = [origin.strip() for origin in raw_value.split(",") if origin.strip()]
+    return _deduplicate_strings(default_origins + configured_origins)
 
 
 class QueryRequest(BaseModel):
@@ -570,10 +581,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_parse_cors_allowed_origins(CORS_ALLOWED_ORIGINS),
+    allow_origin_regex=CORS_ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],

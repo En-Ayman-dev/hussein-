@@ -11,6 +11,7 @@
 
 - [backend](./backend): FastAPI + PostgreSQL/pgvector + منطق الاستدلال والـ ingestion
 - [frontend](./frontend): Next.js لواجهة المحادثة ولوحة الإدارة
+- [DEPLOYMENT.md](./DEPLOYMENT.md): خطة النشر المقترحة على Vercel + Render
 - [خطة التنفيذ الكاملة.md](./خطة التنفيذ الكاملة.md): مرجع التخطيط والتنفيذ للمشروع
 
 ## المتطلبات
