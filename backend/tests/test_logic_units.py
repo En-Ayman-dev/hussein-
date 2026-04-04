@@ -248,6 +248,64 @@ class AnswerComposerUnitTests(unittest.TestCase):
         self.assertIn("foundational_quote", context["supporting_concepts"][0])
         self.assertIn("actions", context["supporting_concepts"][0])
 
+    def test_compose_answer_llm_path_builds_fallback_with_supporting_matches(self) -> None:
+        composer = AnswerComposer(openai_api_key=None)
+        composer.llm_generator = Mock()
+        composer.llm_generator.generate_answer_with_fallback.return_value = SimpleNamespace(
+            content="إجابة مولدة",
+            token_usage={"total_tokens": 12},
+        )
+        composer.llm_generator.INDIRECT_GENERAL_PRINCIPLE_PROMPT = "fallback-prompt"
+
+        primary = ConceptMatch(
+            concept=build_concept(
+                "concept:quran",
+                ["القرآن"],
+                definition=["كتاب الله المنزل على نبيه محمد."],
+                quote=["{كَلَّا إِنَّهَا تَذْكِرَةٌ}"],
+                actions=["الرجوع إليه."],
+                importance=["رئيسي"],
+            ),
+            confidence=0.93,
+            match_type="exact_label",
+            matched_text="القرآن",
+        )
+        supporting = [
+            ConceptMatch(
+                concept=build_concept(
+                    "concept:awareness",
+                    ["الوعي"],
+                    definition=["حضور البصيرة في فهم الواقع."],
+                    quote=["تذكرة للعالمين."],
+                    actions=["رفض التضليل."],
+                    importance=["رئيسي"],
+                ),
+                confidence=0.61,
+                match_type="lexical_definition_fallback",
+                matched_text="الوعي",
+            )
+        ]
+
+        result = composer.compose_answer(
+            QueryIntent.SOLUTION,
+            "كيف نبني الوعي؟",
+            primary,
+            None,
+            QueryAnalysis(
+                intent=QueryIntent.SOLUTION,
+                confidence=0.96,
+                keywords=["كيف", "الوعي"],
+                method="rules",
+                query="كيف نبني الوعي؟",
+            ),
+            supporting_matches=supporting,
+            context_mode="indirect_general_principle",
+        )
+
+        self.assertEqual(result.answer, "إجابة مولدة")
+        self.assertEqual(result.method, "llm")
+        composer.llm_generator.generate_answer_with_fallback.assert_called_once()
+
 
 class AnswerGeneratorUnitTests(unittest.TestCase):
     def test_template_generation_includes_rich_evidence_for_without_ai(self) -> None:

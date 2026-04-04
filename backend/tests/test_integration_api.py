@@ -15,7 +15,8 @@ if str(BACKEND_DIR) not in sys.path:
 from app import main
 from app.security import RequestSecurityManager
 from core.models import Concept, ConceptRelation, ConceptSynonym, Document
-from processing.concept_matcher import ConceptMatcher
+from processing.concept_matcher import ConceptMatch, ConceptMatcher
+from processing.query_analyzer import QueryAnalysis
 from processing.ttl_parser import parse_ttl
 from services.openai_client import OpenAIClient
 
@@ -218,6 +219,81 @@ class ApiIntegrationTests(unittest.TestCase):
                 call(concept, main.QueryIntent.DEFINITION, max_relations=8, max_depth=2),
             ],
         )
+
+    def test_ai_endpoint_uses_ai_fallback_context_before_no_match(self) -> None:
+        concept = Concept(
+            uri="concept:awareness",
+            labels=["الوعي"],
+            definition=["هو حضور البصيرة في فهم الواقع."],
+            quote=["{كَلَّا إِنَّهَا تَذْكِرَةٌ}"],
+            actions=["الرجوع إلى القرآن في كشف التضليل."],
+            importance=["رئيسي"],
+        )
+        match = ConceptMatch(
+            concept=concept,
+            confidence=0.41,
+            match_type="lexical_definition_fallback",
+            matched_text="الوعي",
+        )
+        query_analysis = QueryAnalysis(
+            intent=main.QueryIntent.SOLUTION,
+            confidence=0.92,
+            keywords=["كيف", "الوعي", "التضليل"],
+            method="rule_based",
+            query="كيف نواجه التضليل حين لا يوجد لفظ مطابق مباشر؟",
+        )
+        relation_result = SimpleNamespace(
+            concept=concept,
+            quote=[],
+            relations=[],
+            total_relations_found=0,
+            max_depth_reached=False,
+        )
+        composed_answer = SimpleNamespace(
+            answer="> {كَلَّا إِنَّهَا تَذْكِرَةٌ}\n\nيجب أن نعي أن المواجهة تبدأ من الوعي.",
+            confidence=0.41,
+            sources_used=["concept:concept:awareness"],
+            token_usage={"total_tokens": 10},
+            method="llm",
+        )
+        validation = SimpleNamespace(score=0.91)
+
+        with patch.object(main.query_analyzer, "analyze_query", return_value=query_analysis), patch.object(
+            main.concept_matcher,
+            "find_top_concepts",
+            return_value=[],
+        ), patch.object(
+            main.concept_matcher,
+            "resolve_ai_fallback_matches",
+            return_value={"strategy": "indirect_general_principle", "matches": [match]},
+        ) as mocked_ai_fallback, patch.object(
+            main,
+            "_expand_relation_context",
+            return_value=relation_result,
+        ), patch.object(
+            main.answer_composer,
+            "compose_answer",
+            return_value=composed_answer,
+        ), patch.object(
+            main.answer_validator,
+            "validate_and_regenerate",
+            return_value=(composed_answer.answer, validation),
+        ):
+            response = self.client.post(
+                "/api/chat/query",
+                json={
+                    "question": "كيف نواجه التضليل حين لا يوجد لفظ مطابق مباشر؟",
+                    "use_embeddings": False,
+                    "max_relations": 6,
+                    "max_depth": 2,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertNotEqual(payload["method"], "no_match")
+        self.assertEqual(payload["matched_concept"], "concept:awareness")
+        mocked_ai_fallback.assert_called_once()
 
     def test_without_ai_relation_context_merges_with_definition_relations(self) -> None:
         concept = SimpleNamespace(uri="concept:quran")

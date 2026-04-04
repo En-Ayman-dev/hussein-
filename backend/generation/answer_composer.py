@@ -86,7 +86,8 @@ class AnswerComposer:
         intent: QueryIntent,
         query_confidence: float,
         concept_confidence: Optional[float] = None,
-        context_completeness: float = 0.0
+        context_completeness: float = 0.0,
+        allow_general_principle_fallback: bool = False,
     ) -> bool:
         """Decide whether to use template or LLM generation.
 
@@ -101,6 +102,9 @@ class AnswerComposer:
         """
         if not self.llm_generator:
             return True
+
+        if allow_general_principle_fallback:
+            return False
 
         if intent == QueryIntent.UNKNOWN:
             return True
@@ -157,6 +161,7 @@ class AnswerComposer:
         relation_result: Optional[RelationExpansionResult],
         query_analysis: Optional[QueryAnalysis] = None,
         supporting_matches: Optional[list[ConceptMatch]] = None,
+        context_mode: str = "direct",
     ) -> Dict[str, Any]:
         """Prepare structured context for LLM generation.
 
@@ -173,6 +178,7 @@ class AnswerComposer:
         context = {
             "intent": intent.value if intent else "unknown",
             "question": question,
+            "context_mode": context_mode,
         }
 
         if query_analysis:
@@ -276,6 +282,33 @@ class AnswerComposer:
             context["grouped_relations"] = grouped_relations
 
         return context
+
+    def _build_llm_fallback_answer(
+        self,
+        query_analysis: QueryAnalysis,
+        concept_match: Optional[ConceptMatch],
+        relation_result: Optional[RelationExpansionResult],
+        supporting_matches: Optional[list[ConceptMatch]],
+    ) -> Optional[str]:
+        if concept_match:
+            return self.template_generator.generate_answer(
+                query_analysis,
+                concept_match,
+                relation_result,
+                supporting_matches=supporting_matches,
+            ).answer
+
+        if supporting_matches:
+            pseudo_primary = supporting_matches[0]
+            pseudo_supporting = supporting_matches[1:] if len(supporting_matches) > 1 else None
+            return self.template_generator.generate_answer(
+                query_analysis,
+                pseudo_primary,
+                relation_result,
+                supporting_matches=pseudo_supporting,
+            ).answer
+
+        return "هذا السؤال غير وارد بصورة تفصيلية، لكن المبدأ العام يقتضي الرجوع إلى القرآن والوعي والبصيرة في فهم الموقف."
 
     def _truncate_text(self, value: Optional[str], max_length: Optional[int] = None) -> Optional[str]:
         if value is None:
@@ -420,6 +453,7 @@ class AnswerComposer:
         relation_result: Optional[RelationExpansionResult] = None,
         query_analysis: Optional[QueryAnalysis] = None,
         supporting_matches: Optional[list[ConceptMatch]] = None,
+        context_mode: str = "direct",
     ) -> GeneratedAnswer:
         """Compose final answer by choosing between template and LLM generation.
 
@@ -451,7 +485,11 @@ class AnswerComposer:
 
         # Decide generation method
         use_template = self._should_use_template(
-            intent, query_confidence, concept_confidence, context_completeness
+            intent,
+            query_confidence,
+            concept_confidence,
+            context_completeness,
+            allow_general_principle_fallback=context_mode != "direct",
         )
 
         logger.info(
@@ -481,31 +519,43 @@ class AnswerComposer:
                 relation_result,
                 query_analysis,
                 supporting_matches,
+                context_mode=context_mode,
             )
             logger.info(
-                "LLM context budget prepared: supporting=%s relations=%s evidence_quotes=%s evidence_definitions=%s evidence_actions=%s",
+                "LLM context budget prepared: mode=%s supporting=%s relations=%s evidence_quotes=%s evidence_definitions=%s evidence_actions=%s",
+                context_mode,
                 len(context.get("supporting_concepts", [])),
                 len(context.get("relations", [])),
                 len(context.get("context_evidence", {}).get("quotes", [])),
                 len(context.get("context_evidence", {}).get("definitions", [])),
                 len(context.get("context_evidence", {}).get("actions", [])),
             )
-            fallback_answer = self.template_generator.generate_answer(
+            fallback_answer = self._build_llm_fallback_answer(
                 query_analysis,
                 concept_match,
                 relation_result,
-                supporting_matches=supporting_matches,
+                supporting_matches,
             )
             llm_result = self.llm_generator.generate_answer_with_fallback(
                 context,
                 question,
-                fallback_answer=fallback_answer.answer,
+                fallback_answer=fallback_answer,
+                system_prompt_override=(
+                    self.llm_generator.INDIRECT_GENERAL_PRINCIPLE_PROMPT
+                    if context_mode != "direct"
+                    else None
+                ),
             )
 
             # Create GeneratedAnswer object
             sources_used = []
             if concept_match:
                 sources_used.append(f"concept:{concept_match.concept.uri}")
+            elif supporting_matches:
+                sources_used.extend(
+                    f"concept:{match.concept.uri}"
+                    for match in supporting_matches[: self.MAX_SUPPORTING_CONCEPTS]
+                )
             if relation_result and relation_result.relations:
                 sources_used.extend([f"relation:{rel.relation.id}" for rel in relation_result.relations])
 
@@ -514,17 +564,22 @@ class AnswerComposer:
                 "context_completeness": context_completeness,
                 "query_confidence": query_confidence,
                 "concept_confidence": concept_confidence,
-                "fallback_used": llm_result.content == fallback_answer.answer,
+                "context_mode": context_mode,
+                "fallback_used": llm_result.content == fallback_answer,
             }
 
             answer = GeneratedAnswer(
                 answer=llm_result.content,
                 intent=intent,
-                confidence=min(query_confidence, concept_confidence) if concept_confidence > 0 else query_confidence,
+                confidence=(
+                    min(query_confidence, concept_confidence)
+                    if concept_confidence > 0
+                    else max(query_confidence * 0.75, 0.45 if context_mode != "direct" else query_confidence)
+                ),
                 sources_used=sources_used,
                 structured_data=structured_data,
                 token_usage=llm_result.token_usage,
-                method="template_fallback" if llm_result.content == fallback_answer.answer else "llm",
+                method="template_fallback" if llm_result.content == fallback_answer else "llm",
             )
             logger.info("Used %s generation", answer.method)
             return answer

@@ -686,6 +686,45 @@ class ConceptMatcher:
 
         return list(best_matches.values())
 
+    def _match_entries_relaxed(
+        self,
+        entries: list[IndexedTextEntry],
+        indexes: dict[str, dict[str, set[int]]],
+        search_candidates: List[SearchCandidate],
+        minimum_score: float,
+    ) -> List[ConceptMatch]:
+        best_matches: dict[str, ConceptMatch] = {}
+
+        for search_candidate in search_candidates:
+            for entry_index in self._collect_entry_indices(indexes, search_candidate):
+                entry = entries[entry_index]
+                concept = self._concepts_by_uri.get(entry.concept_uri)
+                if not concept:
+                    continue
+
+                weighted_score = self._score_entry_against_candidate(entry, search_candidate) * entry.field_weight
+                relaxed_threshold = max(minimum_score, entry.threshold * 0.48)
+                if weighted_score < relaxed_threshold:
+                    continue
+
+                fallback_match_type = (
+                    entry.match_type
+                    if entry.match_type in {"exact_label", "synonym"}
+                    else f"{entry.match_type}_fallback"
+                )
+
+                candidate_match = ConceptMatch(
+                    concept=concept,
+                    confidence=weighted_score,
+                    match_type=fallback_match_type,
+                    matched_text=entry.text,
+                )
+                current_match = best_matches.get(concept.uri)
+                if not current_match or candidate_match.confidence > current_match.confidence:
+                    best_matches[concept.uri] = candidate_match
+
+        return list(best_matches.values())
+
     def _exact_label_match(self, search_candidates: List[SearchCandidate]) -> List[ConceptMatch]:
         return self._match_entries(
             self._label_entries,
@@ -825,9 +864,15 @@ class ConceptMatcher:
             "exact_label": 1.0,      # Highest priority
             "synonym": 0.8,          # High priority
             "lexical_label": 0.72,
+            "lexical_label_fallback": 0.58,
             "lexical_definition": 0.62,
+            "lexical_definition_fallback": 0.52,
             "lexical_quote": 0.58,
+            "lexical_quote_fallback": 0.48,
             "lexical_action": 0.6,
+            "lexical_action_fallback": 0.5,
+            "ai_keyword_backfill": 0.46,
+            "seed_principle": 0.36,
             "full_text": 0.6,        # Medium priority
             "full_text_fallback": 0.5,
             "vector": 0.4            # Lower priority, will be boosted by similarity
@@ -884,6 +929,205 @@ class ConceptMatcher:
     ) -> List[ConceptMatch]:
         """Return the top N ranked concept matches."""
         return self.find_concepts(search_term, use_vector)[:max_concepts]
+
+    def find_general_principles(
+        self,
+        search_term: str,
+        max_concepts: int = 3,
+    ) -> List[ConceptMatch]:
+        """Return broader concept matches when direct matching fails.
+
+        This is intended for AI fallback mode, where the system should still
+        recover nearby principles from definitions, quotes, and actions instead
+        of terminating immediately with no_match.
+        """
+        if not search_term or not search_term.strip():
+            return []
+
+        self._ensure_index_loaded()
+        search_candidates = self._with_local_phrase_expansions(
+            self._build_search_candidates(search_term)
+        )
+
+        relaxed_matches: List[ConceptMatch] = []
+        relaxed_matches.extend(
+            self._match_entries_relaxed(
+                self._label_entries,
+                self._label_indexes,
+                search_candidates,
+                minimum_score=0.22,
+            )
+        )
+        relaxed_matches.extend(
+            self._match_entries_relaxed(
+                self._synonym_entries,
+                self._synonym_indexes,
+                search_candidates,
+                minimum_score=0.2,
+            )
+        )
+        relaxed_matches.extend(
+            self._match_entries_relaxed(
+                self._full_text_entries,
+                self._full_text_indexes,
+                search_candidates,
+                minimum_score=0.18,
+            )
+        )
+
+        ranked_matches = [
+            match for match in self._combine_and_rank_matches(relaxed_matches)
+            if match.confidence >= 0.34
+        ]
+        logger.info("Found %s general-principle matches for '%s'", len(ranked_matches), search_term)
+        return ranked_matches[:max_concepts]
+
+    def _find_keyword_backfill_matches(
+        self,
+        search_term: str,
+        max_concepts: int = 5,
+    ) -> List[ConceptMatch]:
+        """Find nearby concepts from keyword overlap when direct matching is weak.
+
+        This is broader than normal matching and is intended only for AI fallback.
+        """
+        self._ensure_index_loaded()
+        stop_words = self._question_stop_words()
+        search_candidates = self._with_local_phrase_expansions(
+            self._build_search_candidates(search_term)
+        )
+        best_matches: dict[str, ConceptMatch] = {}
+
+        def collect_group_indices(
+            indexes: dict[str, dict[str, set[int]]],
+            keyword_words: set[str],
+        ) -> set[int]:
+            collected: set[int] = set()
+            for word in keyword_words:
+                for variant in self._token_variants(word):
+                    collected.update(indexes["token"].get(variant, set()))
+                for signature in self._token_signatures(word):
+                    collected.update(indexes["signature"].get(signature, set()))
+            return collected
+
+        for candidate in search_candidates:
+            keyword_words = {
+                word for word in candidate.word_set
+                if len(word) >= 3 and word not in stop_words
+            }
+            if not keyword_words:
+                continue
+
+            indexed_groups = (
+                (self._label_entries, self._label_indexes),
+                (self._synonym_entries, self._synonym_indexes),
+                (self._full_text_entries, self._full_text_indexes),
+            )
+
+            for entry_group, entry_indexes in indexed_groups:
+                collected_indices = collect_group_indices(entry_indexes, keyword_words)
+                for entry_index in collected_indices:
+                    if entry_index >= len(entry_group):
+                        continue
+                    entry = entry_group[entry_index]
+                    concept = self._concepts_by_uri.get(entry.concept_uri)
+                    if not concept:
+                        continue
+
+                    overlap = len(keyword_words.intersection(entry.word_set))
+                    fuzzy_overlap = self._fuzzy_overlap_score(keyword_words, set(entry.word_set))
+                    if overlap == 0 and fuzzy_overlap == 0.0:
+                        continue
+
+                    richness = 0.0
+                    if concept.definition:
+                        richness += 0.08
+                    if concept.quote:
+                        richness += 0.08
+                    if concept.actions:
+                        richness += 0.06
+
+                    weighted_score = (
+                        min(overlap / max(len(keyword_words), 1), 1.0) * 0.42
+                        + min(fuzzy_overlap / max(len(keyword_words), 1), 1.0) * 0.18
+                        + self._calculate_importance_boost(concept) * 0.5
+                        + richness
+                    )
+                    if weighted_score < 0.2:
+                        continue
+
+                    candidate_match = ConceptMatch(
+                        concept=concept,
+                        confidence=weighted_score,
+                        match_type="ai_keyword_backfill",
+                        matched_text=" ".join(sorted(keyword_words)),
+                    )
+                    current_match = best_matches.get(concept.uri)
+                    if not current_match or candidate_match.confidence > current_match.confidence:
+                        best_matches[concept.uri] = candidate_match
+
+        ranked_matches = self._combine_and_rank_matches(list(best_matches.values()))
+        return ranked_matches[:max_concepts]
+
+    def get_seed_principles(self, max_concepts: int = 3) -> List[ConceptMatch]:
+        """Return rich high-importance concepts as a last-resort AI seed context."""
+        self._ensure_index_loaded()
+        seed_matches: list[ConceptMatch] = []
+
+        for concept in self._concepts_by_uri.values():
+            primary_label = next((label for label in (concept.labels or []) if (label or "").strip()), None)
+            if not primary_label:
+                continue
+
+            importance_boost = self._calculate_importance_boost(concept)
+            richness = 0.0
+            if concept.definition:
+                richness += 0.18
+            if concept.quote:
+                richness += 0.18
+            if concept.actions:
+                richness += 0.12
+
+            seed_score = 0.12 + importance_boost + richness
+            if seed_score < 0.42:
+                continue
+
+            seed_matches.append(
+                ConceptMatch(
+                    concept=concept,
+                    confidence=seed_score,
+                    match_type="seed_principle",
+                    matched_text=primary_label,
+                )
+            )
+
+        ranked_matches = self._combine_and_rank_matches(seed_matches)
+        return ranked_matches[:max_concepts]
+
+    def resolve_ai_fallback_matches(
+        self,
+        search_term: str,
+        max_concepts: int = 5,
+    ) -> Dict[str, Any]:
+        """Resolve an AI-only fallback context strategy when direct match fails."""
+        general_principles = self.find_general_principles(search_term, max_concepts=max_concepts)
+        if general_principles:
+            return {
+                "strategy": "indirect_general_principle",
+                "matches": general_principles,
+            }
+
+        keyword_backfill = self._find_keyword_backfill_matches(search_term, max_concepts=max_concepts)
+        if keyword_backfill:
+            return {
+                "strategy": "keyword_backfill",
+                "matches": keyword_backfill,
+            }
+
+        return {
+            "strategy": "seed_principles",
+            "matches": self.get_seed_principles(max_concepts=max_concepts),
+        }
 
     def find_concepts(self, search_term: str, use_vector: bool = True) -> List[ConceptMatch]:
         """Find concepts matching the search term using multiple strategies.

@@ -954,6 +954,17 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
         )
         _record_stage("match", match_started_at)
 
+        ai_context_mode = "direct"
+        if use_ai and not top_concepts:
+            fallback_context_started_at = time.perf_counter()
+            ai_fallback_context = selected_concept_matcher.resolve_ai_fallback_matches(
+                normalized_request.question,
+                max_concepts=4,
+            )
+            top_concepts = ai_fallback_context.get("matches", [])
+            ai_context_mode = ai_fallback_context.get("strategy", "indirect_general_principle")
+            _record_stage("match_ai_fallback_context", fallback_context_started_at)
+
         if not top_concepts:
             response_data = _build_no_match_response(query_analysis.intent.value, time.time(), mode)
             response_data["processing_time"] = round(time.perf_counter() - request_started_at, 2)
@@ -994,6 +1005,7 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
             relation_result,
             query_analysis,
             supporting_matches=unique_concepts[1:4],
+            context_mode=ai_context_mode if use_ai else "direct",
         )
         _record_stage("compose", compose_started_at)
         regeneration_composer = (
@@ -1047,13 +1059,14 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
         }
 
         logger.info(
-            "Processed query mode=%s method=%s matched=%s total=%.3fs timings=%s regeneration=%s",
+            "Processed query mode=%s method=%s matched=%s total=%.3fs timings=%s regeneration=%s ai_context_mode=%s",
             mode,
             composed_answer.method,
             selected_concept.concept.uri,
             time.perf_counter() - request_started_at,
             stage_timings,
             ENABLE_AI_REGENERATION and use_ai and composed_answer.method == "llm",
+            ai_context_mode,
         )
         cache_response(cache_key, response_data)
         return response_data
