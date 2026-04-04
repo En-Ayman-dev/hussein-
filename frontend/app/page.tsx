@@ -1,8 +1,15 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import { ChatMessage } from "@/components/chat-message";
+import {
+  InsightPanel,
+  type InsightQuoteItem,
+  type InsightRelationGroup,
+  type InsightSectionKey,
+  type InsightView,
+} from "@/components/insight-panel";
 import { TypingIndicator } from "@/components/typing-indicator";
 import { getChatApiUrl, getChatWithoutAiApiUrl } from "@/lib/api";
 
@@ -51,61 +58,29 @@ const MODE_CONTENT: Record<
       "ما هو القرآن؟",
       "ما معنى الأمة الوسط؟",
       "ما هي قسوة القلب؟",
+      "ما هي آيات الله؟",
+      "ما هو التضليل؟",
+      "ما هو خبث اليهود؟",
+      "ما معنى الثقلين؟",
+      "من هم أعلام الهدى؟",
+      "ما هي العزة والقوة؟",
+      "ما معنى الهدى؟",
+      "ما هو الانحراف التاريخي؟",
+      "ما هو التقصير؟",
+      "ما معنى المسؤولية؟",
+      "ما هي البصيرة؟",
+      "ما معنى الوعي؟",
+      "كيف يواجه المؤمن التضليل؟",
+      "ما سبب قسوة القلب؟",
+      "كيف نرجع إلى القرآن؟",
     ],
     welcomeBody: [
-      "• هذا المسار يعتمد على القاعدة مباشرة ولا يستخدم التوليد عبر OpenAI.",
+      "• هذا المسار يعتمد على القاعدة مباشرة ولا يستخدم أي توليد خارجي.",
       "• يعمل أفضل مع الأسئلة الواضحة والمفاهيم المباشرة والأسئلة عن السبب أو الحل.",
       "• ستظهر لك الخلاصة والعلاقات والاقتباسات المؤسسة فقط.",
     ],
   },
 };
-
-const SUMMARY_STOP_WORDS = new Set([
-  "ما",
-  "ماذا",
-  "هو",
-  "هي",
-  "كيف",
-  "لماذا",
-  "لما",
-  "هل",
-  "عن",
-  "في",
-  "من",
-  "على",
-  "الى",
-  "إلى",
-  "ثم",
-  "و",
-  "أو",
-  "او",
-  "أن",
-  "إن",
-  "هذا",
-  "هذه",
-]);
-
-const STRUCTURAL_SECTION_TITLES = new Set([
-  "الخلاصة",
-  "التعريف",
-  "اقتباس",
-  "اقتباسات",
-  "اقتباسات مؤسسة",
-  "النص التأسيسي",
-  "التحليل",
-  "الموقف العملي",
-  "المطلوب عملياً",
-  "المصطلحات ذات الصلة",
-  "روابط مهمة",
-  "الأسباب",
-  "المشكلة المقابلة",
-  "الحلول والطرق",
-  "الإجراءات المقترحة",
-  "حلول إضافية",
-  "المقارنة",
-  "المقارنة والاختلافات",
-  "الاختلافات الرئيسية",
-]);
 
 type ApiConcept = {
   actions: string[];
@@ -146,6 +121,7 @@ type ChatApiResponse = {
 type Message = {
   id: string;
   isAnimating?: boolean;
+  responseMode?: ResponseMode;
   sender: "user" | "assistant";
   text: string;
 };
@@ -153,16 +129,8 @@ type Message = {
 type DisplayRelation = {
   target?: string;
   text: string;
-};
-
-type InsightView = {
-  actions: string[];
-  definition: string | null;
-  quotes: string[];
-  relatedTerms: string[];
-  relationItems: string[];
-  summary: string | null;
-  title: string | null;
+  typeKey: string;
+  typeLabel: string;
 };
 
 type PresentationModel = {
@@ -174,11 +142,53 @@ function createId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function normalizeResponseMode(value: string | null | undefined): ResponseMode | null {
+  return value === "ai" || value === "without_ai" ? value : null;
+}
+
+function buildRelationFollowUpQuestion(
+  conceptTitle: string | null,
+  relation: DisplayRelation,
+): string {
+  const concept = conceptTitle || "هذا المفهوم";
+  const target = relation.target || relation.text;
+
+  switch (relation.typeKey) {
+    case "IS_MEANS_FOR":
+      return `كيف يكون ${target} وسيلة مرتبطة بـ ${concept}؟`;
+    case "CAUSES":
+    case "IS_CAUSED_BY":
+      return `ما علاقة ${concept} بـ ${target} من جهة السبب والنتيجة؟`;
+    case "OPPOSES":
+      return `ما الفرق بين ${concept} و${target}؟`;
+    case "ESTABLISHES":
+      return `كيف يرتبط ${concept} بـ ${target} في التأسيس والمعنى؟`;
+    case "NEGATES":
+      return `ما الذي ينفيه ${concept} في سياق ${target}؟`;
+    default:
+      return `ما علاقة ${concept} بـ ${target}؟`;
+  }
+}
+
+function buildQuoteFollowUpQuestion(
+  conceptTitle: string | null,
+  quote: InsightQuoteItem,
+): string {
+  const concept = conceptTitle || "هذا المفهوم";
+
+  if (quote.label && quote.label !== "اقتباس" && quote.label !== concept) {
+    return `ما دلالة اقتباس ${quote.label} في فهم ${concept}؟`;
+  }
+
+  return `ما دلالة هذا الاقتباس في فهم ${concept}؟`;
+}
+
 function createWelcomeMessage(mode: ResponseMode): Message {
   const content = MODE_CONTENT[mode];
 
   return {
     id: "welcome",
+    responseMode: mode,
     sender: "assistant",
     text: [
       `**${mode === "ai" ? "وضع AI" : "وضع بدون AI"}**`,
@@ -234,35 +244,6 @@ function normalizeComparisonText(value: string): string {
     .trim();
 }
 
-function meaningfulTokens(value: string): string[] {
-  return normalizeComparisonText(value)
-    .split(" ")
-    .filter((token) => token.length > 1 && !SUMMARY_STOP_WORDS.has(token));
-}
-
-function isTooSimilarToQuestion(candidate: string, question: string): boolean {
-  const normalizedCandidate = normalizeComparisonText(candidate);
-  const normalizedQuestion = normalizeComparisonText(question);
-
-  if (!normalizedCandidate || !normalizedQuestion) {
-    return false;
-  }
-
-  if (normalizedCandidate === normalizedQuestion) {
-    return true;
-  }
-
-  const candidateTokens = meaningfulTokens(normalizedCandidate);
-  const questionTokens = meaningfulTokens(normalizedQuestion);
-  if (candidateTokens.length === 0 || questionTokens.length === 0) {
-    return false;
-  }
-
-  const questionTokenSet = new Set(questionTokens);
-  const overlap = candidateTokens.filter((token) => questionTokenSet.has(token)).length;
-  return overlap / Math.max(Math.min(candidateTokens.length, questionTokens.length), 1) >= 0.85;
-}
-
 function trimSummary(value: string, maxLength = 340): string {
   const cleaned = sanitizeText(value);
   if (cleaned.length <= maxLength) {
@@ -272,82 +253,31 @@ function trimSummary(value: string, maxLength = 340): string {
   return `${cleaned.slice(0, maxLength).trimEnd()}...`;
 }
 
-function toPlainLine(value: string): string {
-  let cleaned = sanitizeText(value)
-    .replace(/^>\s*/g, "")
-    .replace(/^[-•]\s*/g, "")
-    .replace(/^\*\*(.*?)\*\*:?\s*$/g, "$1")
-    .replace(/\*\*/g, "")
-    .trim();
-
-  cleaned = normalizeComparisonText(cleaned);
-  return cleaned;
-}
-
-function extractSummaryCandidate(
-  answer: string,
+function buildInsightSummary(
   question: string,
-  primaryLabel: string | null,
-): string | null {
-  const lines = sanitizeText(answer)
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const summaryLines: string[] = [];
-
-  for (const rawLine of lines) {
-    if (rawLine.startsWith(">")) {
-      continue;
-    }
-
-    const plainLine = toPlainLine(rawLine);
-    if (!plainLine) {
-      continue;
-    }
-
-    if (STRUCTURAL_SECTION_TITLES.has(plainLine)) {
-      continue;
-    }
-
-    if (primaryLabel && normalizeComparisonText(primaryLabel) === plainLine) {
-      continue;
-    }
-
-    if (isTooSimilarToQuestion(plainLine, question)) {
-      continue;
-    }
-
-    summaryLines.push(plainLine);
-    if (summaryLines.length >= 2) {
-      break;
-    }
-  }
-
-  if (summaryLines.length === 0) {
-    return null;
-  }
-
-  return trimSummary(summaryLines.join(" "));
-}
-
-function buildFallbackSummary(
   definition: string | null,
   relatedTerms: string[],
   relationItems: string[],
   actions: string[],
 ): string | null {
   const parts: string[] = [];
+  const normalizedQuestion = normalizeComparisonText(question);
 
   if (definition) {
     parts.push(definition);
   }
 
-  if (actions.length > 0) {
-    parts.push(`والموقف العملي المتصل به هو: ${actions[0]}`);
+  if (/(كيف|نواجه|مواجهة|نعمل|نطبق|نتبع|حل)/.test(normalizedQuestion) && actions.length > 0) {
+    parts.push(`وأبرز ما يتصل بهذا الطلب عملياً هو: ${actions[0]}`);
+  } else if (/(سبب|لماذا|لما|نتيجة)/.test(normalizedQuestion) && relationItems.length > 0) {
+    parts.push(`وفي سياق السبب أو النتيجة يظهر ارتباطه بـ ${relationItems.slice(0, 2).join("، ")}.`);
   } else if (relationItems.length > 0) {
     parts.push(`ويرتبط في السياق بـ ${relationItems.slice(0, 2).join("، ")}.`);
-  } else if (relatedTerms.length > 0) {
+  }
+
+  if (parts.length < 2 && actions.length > 0 && !parts.some((part) => part.includes(actions[0]))) {
+    parts.push(`ومن التوجيه العملي الأقرب إليه: ${actions[0]}`);
+  } else if (parts.length < 2 && relatedTerms.length > 0) {
     parts.push(`ويرتبط أيضاً بمفاهيم مثل: ${relatedTerms.slice(0, 3).join("، ")}.`);
   }
 
@@ -404,22 +334,22 @@ function parseRelationSummary(
   }
 
   if (primaryLabel && source === primaryLabel && target) {
-    return { target, text: `${relationVerb} ${target}` };
+    return { target, text: `${relationVerb} ${target}`, typeKey: toRelationKey(rawType), typeLabel: relationVerb };
   }
 
   if (primaryLabel && target === primaryLabel && source) {
-    return { target: source, text: `${source} ${relationVerb}` };
+    return { target: source, text: `${source} ${relationVerb}`, typeKey: toRelationKey(rawType), typeLabel: relationVerb };
   }
 
   if (source && target) {
-    return { target, text: `${source} ${relationVerb} ${target}` };
+    return { target, text: `${source} ${relationVerb} ${target}`, typeKey: toRelationKey(rawType), typeLabel: relationVerb };
   }
 
   if (target) {
-    return { target, text: `${relationVerb} ${target}` };
+    return { target, text: `${relationVerb} ${target}`, typeKey: toRelationKey(rawType), typeLabel: relationVerb };
   }
 
-  return { target: source || undefined, text: `${source} ${relationVerb}` };
+  return { target: source || undefined, text: `${source} ${relationVerb}`, typeKey: toRelationKey(rawType), typeLabel: relationVerb };
 }
 
 function buildRelationFromDetail(
@@ -431,9 +361,10 @@ function buildRelationFromDetail(
   const summary = normalizeDisplayValue(detail.summary);
   const relationVerb =
     normalizeDisplayValue(detail.type_label) || humanizeRelationType(detail.type);
+  const typeKey = toRelationKey(detail.type);
 
   if (summary) {
-    return { target: target || source || undefined, text: summary };
+    return { target: target || source || undefined, text: summary, typeKey, typeLabel: relationVerb };
   }
 
   if (!source && !target) {
@@ -441,22 +372,134 @@ function buildRelationFromDetail(
   }
 
   if (primaryLabel && source === primaryLabel && target) {
-    return { target, text: `${relationVerb} ${target}` };
+    return { target, text: `${relationVerb} ${target}`, typeKey, typeLabel: relationVerb };
   }
 
   if (primaryLabel && target === primaryLabel && source) {
-    return { target: source, text: `${source} ${relationVerb}` };
+    return { target: source, text: `${source} ${relationVerb}`, typeKey, typeLabel: relationVerb };
   }
 
   if (source && target) {
-    return { target, text: `${source} ${relationVerb} ${target}` };
+    return { target, text: `${source} ${relationVerb} ${target}`, typeKey, typeLabel: relationVerb };
   }
 
   if (target) {
-    return { target, text: `${relationVerb} ${target}` };
+    return { target, text: `${relationVerb} ${target}`, typeKey, typeLabel: relationVerb };
   }
 
-  return { target: source || undefined, text: `${source} ${relationVerb}` };
+  return { target: source || undefined, text: `${source} ${relationVerb}`, typeKey, typeLabel: relationVerb };
+}
+
+function buildQuoteItems(concepts: ApiConcept[]): InsightView["quoteItems"] {
+  const seen = new Set<string>();
+  const items: InsightView["quoteItems"] = [];
+
+  for (const concept of concepts) {
+    const label = uniqueValues(concept.labels)[0];
+    if (!label) {
+      continue;
+    }
+
+    for (const quote of uniqueValues(concept.quote)) {
+      const signature = `${label}::${quote}`;
+      if (seen.has(signature)) {
+        continue;
+      }
+      seen.add(signature);
+      items.push({ label, text: quote });
+    }
+  }
+
+  return items.slice(0, 12);
+}
+
+function groupRelationItems(items: DisplayRelation[]): InsightRelationGroup[] {
+  const groups = new Map<string, InsightRelationGroup>();
+
+  for (const item of items) {
+    if (!groups.has(item.typeKey)) {
+      groups.set(item.typeKey, {
+        key: item.typeKey,
+        title: item.typeLabel,
+        items: [],
+      });
+    }
+
+    groups.get(item.typeKey)?.items.push(item);
+  }
+
+  const order = [
+    "IS_MEANS_FOR",
+    "CAUSES",
+    "IS_CAUSED_BY",
+    "ESTABLISHES",
+    "OPPOSES",
+    "RELATED_TO",
+    "BELONGS_TO_GROUP",
+    "BELONGS_TO_COLLECTION",
+    "BELONGS_TO_LESSON",
+    "PRECEDES",
+    "NEGATES",
+  ];
+
+  return [...groups.values()].sort((left, right) => {
+    const leftIndex = order.indexOf(left.key);
+    const rightIndex = order.indexOf(right.key);
+    const safeLeft = leftIndex === -1 ? order.length : leftIndex;
+    const safeRight = rightIndex === -1 ? order.length : rightIndex;
+    return safeLeft - safeRight;
+  });
+}
+
+function inferInsightFocus(
+  question: string,
+  options: {
+    hasActions: boolean;
+    hasQuotes: boolean;
+    hasRelations: boolean;
+    hasTerms: boolean;
+  },
+): InsightSectionKey {
+  const normalized = normalizeComparisonText(question);
+
+  if (/(آية|آيات|دليل|اقتباس|نص)/.test(normalized) && options.hasQuotes) {
+    return "quotes";
+  }
+
+  if (/(كيف|نواجه|مواجهة|نتبع|نعمل|نطبق|الموقف|واجب|حل)/.test(normalized)) {
+    if (options.hasActions) {
+      return "actions";
+    }
+    if (options.hasRelations) {
+      return "relations";
+    }
+  }
+
+  if (/(سبب|لماذا|لما|نتيجة|يؤدي)/.test(normalized) && options.hasRelations) {
+    return "relations";
+  }
+
+  if (/(فرق|مقارنة|مقابل|بين)/.test(normalized) && options.hasRelations) {
+    return "relations";
+  }
+
+  if (options.hasActions) {
+    return "actions";
+  }
+
+  if (options.hasRelations) {
+    return "relations";
+  }
+
+  if (options.hasQuotes) {
+    return "quotes";
+  }
+
+  if (options.hasTerms) {
+    return "concepts";
+  }
+
+  return "overview";
 }
 
 function isAnswerHelpful(answer: string): boolean {
@@ -521,6 +564,7 @@ function buildPresentation(response: ChatApiResponse, question: string): Present
           .filter((relation): relation is DisplayRelation => Boolean(relation));
 
   const relationItems = uniqueValues(parsedRelations.map((relation) => relation.text)).slice(0, 5);
+  const relationGroups = groupRelationItems(parsedRelations);
   const relatedTerms = uniqueValues([
     ...parsedRelations.map((relation) => relation.target),
     ...response.top_concepts.flatMap((concept) => concept.labels),
@@ -528,16 +572,26 @@ function buildPresentation(response: ChatApiResponse, question: string): Present
     .filter((label) => label !== primaryLabel)
     .slice(0, 6);
 
+  const quoteItems = buildQuoteItems(response.top_concepts);
   const quotes = uniqueValues([
     response.quote,
     ...response.top_quotes,
+    ...quoteItems.map((item) => item.text),
     ...(primaryConcept ? primaryConcept.quote : []),
-  ]).slice(0, 4);
-  const summary =
-    (isAnswerHelpful(cleanedAnswer)
-      ? extractSummaryCandidate(cleanedAnswer, question, primaryLabel)
-      : null) ||
-    buildFallbackSummary(primaryDefinition, relatedTerms, relationItems, primaryActions);
+  ]).slice(0, 8);
+  const focusSection = inferInsightFocus(question, {
+    hasActions: primaryActions.length > 0,
+    hasQuotes: quotes.length > 0,
+    hasRelations: relationGroups.length > 0,
+    hasTerms: relatedTerms.length > 0,
+  });
+  const summary = buildInsightSummary(
+    question,
+    primaryDefinition,
+    relatedTerms,
+    relationItems,
+    primaryActions,
+  );
 
   const fallbackSections: string[] = [];
   if (primaryLabel) {
@@ -585,8 +639,11 @@ function buildPresentation(response: ChatApiResponse, question: string): Present
     insight: {
       actions: primaryActions,
       definition: primaryDefinition,
+      focusSection,
+      quoteItems,
       quotes,
       relatedTerms,
+      relationGroups,
       relationItems,
       summary,
       title: primaryLabel,
@@ -606,6 +663,7 @@ export default function HomePage() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const typingTimersRef = useRef<number[]>([]);
   const copyTimerRef = useRef<number | null>(null);
 
@@ -742,7 +800,9 @@ export default function HomePage() {
         throw new Error(detail);
       }
 
-      const presentation = buildPresentation(payload as ChatApiResponse, trimmedQuestion);
+      const apiResponse = payload as ChatApiResponse;
+      const assistantResponseMode = normalizeResponseMode(apiResponse.mode) || responseMode;
+      const presentation = buildPresentation(apiResponse, trimmedQuestion);
       const assistantMessageId = createId("assistant");
       setActiveInsight(presentation.insight);
       setMessages((current) => [
@@ -750,6 +810,7 @@ export default function HomePage() {
         {
           id: assistantMessageId,
           isAnimating: true,
+          responseMode: assistantResponseMode,
           sender: "assistant",
           text: "",
         },
@@ -768,6 +829,7 @@ export default function HomePage() {
         {
           id: assistantMessageId,
           isAnimating: true,
+          responseMode,
           sender: "assistant",
           text: "",
         },
@@ -781,6 +843,28 @@ export default function HomePage() {
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void sendQuestion(draft);
+  }
+
+  function handleQuestionKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && event.shiftKey) {
+      event.preventDefault();
+      void sendQuestion(draft);
+    }
+  }
+
+  function handleInsightTermSelection(term: string) {
+    setDraft(`ما معنى ${term}؟`);
+    textareaRef.current?.focus();
+  }
+
+  function handleInsightRelationSelection(relation: DisplayRelation) {
+    setDraft(buildRelationFollowUpQuestion(activeInsight?.title || null, relation));
+    textareaRef.current?.focus();
+  }
+
+  function handleInsightQuoteSelection(quote: InsightQuoteItem) {
+    setDraft(buildQuoteFollowUpQuestion(activeInsight?.title || null, quote));
+    textareaRef.current?.focus();
   }
 
   return (
@@ -836,55 +920,75 @@ export default function HomePage() {
                         ? () => void copyText(message.id, message.text)
                         : undefined
                     }
+                    responseMode={message.responseMode}
                     sender={message.sender}
                     text={message.text}
                   />
                 </div>
               ))}
 
-              {isSubmitting ? <TypingIndicator /> : null}
+              {isSubmitting ? <TypingIndicator responseMode={responseMode} /> : null}
             </div>
           </div>
 
-          <div className="border-t border-slate-200/80 bg-white/88 px-4 py-4 sm:px-5">
-            <div className="mb-3 flex flex-wrap gap-2">
-              {modeContent.suggestedQuestions.map((question) => (
-                <button
-                  key={question}
-                  type="button"
-                  onClick={() => void sendQuestion(question)}
-                  disabled={isSubmitting || isReplyAnimating}
-                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {question}
-                </button>
-              ))}
+          <div className="border-t border-slate-200/80 bg-white/92 px-4 py-3 sm:px-5">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <p className="text-[11px] font-semibold tracking-[0.18em] text-slate-400">
+                أسئلة سريعة
+              </p>
+              <p className="text-[11px] text-slate-400">
+                {draft.length > 0 ? `${draft.length}/${MAX_QUESTION_LENGTH}` : `${modeContent.suggestedQuestions.length} اقتراحات`}
+              </p>
             </div>
 
-            <form onSubmit={handleSubmit} className="space-y-3">
+            <div className="mb-3 overflow-x-auto pb-1">
+              <div className="flex w-max min-w-full gap-2">
+                {modeContent.suggestedQuestions.map((question) => (
+                  <button
+                    key={question}
+                    type="button"
+                    onClick={() => void sendQuestion(question)}
+                    disabled={isSubmitting || isReplyAnimating}
+                    className="shrink-0 whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {question}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-2">
               <label htmlFor="chat-question" className="sr-only">
                 اكتب سؤالك
               </label>
-              <textarea
-                id="chat-question"
-                value={draft}
-                onChange={(event) => setDraft(event.target.value.slice(0, MAX_QUESTION_LENGTH))}
-                placeholder={modeContent.placeholder}
-                disabled={isSubmitting || isReplyAnimating}
-                className="min-h-24 w-full resize-none rounded-[24px] border border-slate-200 bg-slate-50/80 px-5 py-4 text-[15px] leading-8 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-sky-300 focus:bg-white focus:ring-4 focus:ring-sky-100"
-              />
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  disabled={!draft.trim() || isSubmitting || isReplyAnimating}
-                  className="inline-flex items-center justify-center rounded-full bg-[linear-gradient(135deg,#0f172a,#0369a1)] px-6 py-3 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isSubmitting
-                    ? "جارٍ تحليل السؤال..."
-                    : isReplyAnimating
-                      ? "الرد قيد الكتابة..."
-                      : "إرسال السؤال"}
-                </button>
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                <textarea
+                  id="chat-question"
+                  ref={textareaRef}
+                  rows={2}
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value.slice(0, MAX_QUESTION_LENGTH))}
+                  onKeyDown={handleQuestionKeyDown}
+                  placeholder={modeContent.placeholder}
+                  disabled={isSubmitting || isReplyAnimating}
+                  className="min-h-[68px] max-h-28 w-full resize-none rounded-[20px] border border-slate-200 bg-slate-50/85 px-4 py-2.5 text-[15px] leading-7 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-sky-300 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                />
+                <div className="flex flex-col items-end gap-1.5 sm:self-end">
+                  <button
+                    type="submit"
+                    disabled={!draft.trim() || isSubmitting || isReplyAnimating}
+                    className="inline-flex min-w-28 items-center justify-center rounded-full bg-[linear-gradient(135deg,#0f172a,#0369a1)] px-4 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isSubmitting
+                      ? "جارٍ التحليل"
+                      : isReplyAnimating
+                        ? "قيد الكتابة"
+                        : "إرسال"}
+                  </button>
+                  <p className="text-[11px] text-slate-400">
+                    إرسال سريع: <span className="font-semibold text-slate-500">Shift + Enter</span>
+                  </p>
+                </div>
               </div>
             </form>
           </div>
@@ -898,109 +1002,13 @@ export default function HomePage() {
 
             <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
               {activeInsight ? (
-                <div className="space-y-5">
-                  {activeInsight.summary ? (
-                    <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 px-4 py-4">
-                      <p className="text-sm font-semibold text-slate-900">الخلاصة</p>
-                      <p className="mt-2 text-sm leading-8 text-slate-700">{activeInsight.summary}</p>
-                    </div>
-                  ) : null}
-
-                  <div>
-                    <h3 className="text-2xl font-semibold text-slate-950">
-                      {activeInsight.title || "نتيجة البحث"}
-                    </h3>
-                    {activeInsight.definition ? (
-                      <p className="mt-3 text-sm leading-8 text-slate-600">
-                        {activeInsight.definition}
-                      </p>
-                    ) : (
-                      <p className="mt-3 text-sm leading-8 text-slate-500">
-                        لا يوجد تعريف نصي أوضح لهذا المفهوم في البيانات الحالية.
-                      </p>
-                    )}
-                  </div>
-
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900">المطلوب عملياً</p>
-                    {activeInsight.actions.length > 0 ? (
-                      <ul className="mt-3 space-y-2 text-sm leading-7 text-slate-600">
-                        {activeInsight.actions.map((action) => (
-                          <li
-                            key={action}
-                            className="rounded-2xl border border-slate-200/80 bg-slate-50/70 px-4 py-3"
-                          >
-                            {action}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="mt-2 text-sm text-slate-500">
-                        لا يوجد توجيه عملي صريح لهذا المفهوم في هذه النتيجة.
-                      </p>
-                    )}
-                  </div>
-
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900">مصطلحات مرتبطة</p>
-                    {activeInsight.relatedTerms.length > 0 ? (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {activeInsight.relatedTerms.map((term) => (
-                          <span
-                            key={term}
-                            className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-700"
-                          >
-                            {term}
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="mt-2 text-sm text-slate-500">
-                        لا توجد مصطلحات إضافية صالحة للعرض في هذه النتيجة.
-                      </p>
-                    )}
-                  </div>
-
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900">علاقات مهمة</p>
-                    {activeInsight.relationItems.length > 0 ? (
-                      <ul className="mt-3 space-y-2 text-sm leading-7 text-slate-600">
-                        {activeInsight.relationItems.map((item) => (
-                          <li
-                            key={item}
-                            className="rounded-2xl border border-slate-200/80 bg-slate-50/70 px-4 py-3"
-                          >
-                            {item}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="mt-2 text-sm text-slate-500">
-                        لا توجد علاقات مهمة صالحة للعرض في هذه الاستجابة.
-                      </p>
-                    )}
-                  </div>
-
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900">اقتباسات</p>
-                    {activeInsight.quotes.length > 0 ? (
-                      <div className="mt-3 space-y-3">
-                        {activeInsight.quotes.map((quote) => (
-                          <blockquote
-                            key={quote}
-                            className="rounded-2xl border border-sky-200 bg-sky-50/80 px-4 py-4 text-sm leading-8 text-slate-700"
-                          >
-                            {quote}
-                          </blockquote>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="mt-2 text-sm text-slate-500">
-                        لا توجد اقتباسات متاحة لهذا المفهوم حالياً.
-                      </p>
-                    )}
-                  </div>
-                </div>
+                <InsightPanel
+                  key={`${activeInsight.title || "none"}-${activeInsight.focusSection}-${activeInsight.summary || ""}`}
+                  insight={activeInsight}
+                  onSelectQuote={handleInsightQuoteSelection}
+                  onSelectRelation={handleInsightRelationSelection}
+                  onSelectTerm={handleInsightTermSelection}
+                />
               ) : (
                 <p className="text-sm leading-8 text-slate-500">
                   {modeContent.insightHint}
