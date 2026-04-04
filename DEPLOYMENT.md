@@ -1,125 +1,282 @@
 # Deployment Guide
 
-## Final No-Card Architecture
+هذا الملف يوثق خيارات نشر المشروع كما يدعمها المستودع الحالي، مع التركيز على المسارات المناسبة فعليًا لهذا النظام، لا على حلول نظرية عامة.
 
-This is the recommended free deployment path without adding a payment card:
+الهدف من هذا الدليل:
+- اختيار بنية نشر مناسبة
+- فهم القيود التشغيلية
+- ضبط المتغيرات البيئية اللازمة
+- تنفيذ النشر دون تسريب أسرار أو ربط المشروع بمسار غير مناسب
 
-- `Vercel` for the frontend
-- `Vercel` for the backend as a separate project rooted at `backend/`
-- `Supabase` for PostgreSQL with `pgvector`
-- No managed Redis in production for now
+---
 
-## Why This Architecture
+## 1. ملامح المشروع التي تؤثر على قرار النشر
 
-### Frontend: Vercel
-- The frontend is a native `Next.js` app.
-- Vercel is the best operational fit for this layer.
-- It supports monorepos cleanly by selecting `frontend/` as the project root.
+هذا المشروع ليس مجرد واجهة Next.js عادية، بل يتكون من:
 
-### Backend: Vercel
-- The backend is `FastAPI`.
-- Vercel officially supports deploying FastAPI apps as Python functions.
-- This keeps deployment simple and avoids adding another paid provider.
-- The repository is already prepared for this with [backend/index.py](./backend/index.py) and [backend/vercel.json](./backend/vercel.json).
+- **Frontend**
+  - `Next.js`
+  - واجهة دردشة + لوحة إدارة
 
-### Database: Supabase
-- The project requires PostgreSQL plus `pgvector`.
-- Supabase provides a free Postgres project tier and supports vector use cases.
-- The application already works with any PostgreSQL connection string through `DATABASE_URL`.
+- **Backend**
+  - `FastAPI`
+  - parsing للـ TTL
+  - retrieval pipeline
+  - AI / without_ai modes
+  - upload + reindex + audit endpoints
 
-## Important Operational Constraint
+- **Database**
+  - `PostgreSQL`
+  - `pgvector`
 
-This stack is correct for free deployment, but one part must be handled carefully:
+- **Optional cache**
+  - `Redis`
 
-- chat and read endpoints are fine on Vercel
-- heavy maintenance operations such as full ontology reindexing are better run locally against the Supabase database
+بالتالي لا يوجد “نشر واحد مثالي لكل الطبقات”، بل يوجد مسار موصى به ومسار بديل حسب طبيعة التشغيل.
 
-Reason:
-- Vercel Functions are a good fit for request/response APIs
-- full embedding rebuilds can take much longer and are not the right production path for a free serverless function
+---
 
-## Production Shape
+## 2. ملف النشر الموصى به
 
-### Frontend Project on Vercel
-- Root directory: `frontend`
-- Framework: Next.js
-- Required env:
+## الخيار الموصى به اقتصاديًا
 
-```env
-NEXT_PUBLIC_API_BASE_URL=https://<your-backend-project>.vercel.app
-```
+### Frontend
+- `Vercel`
 
-### Backend Project on Vercel
-- Root directory: `backend`
-- Entry point: `index.py`
-- Required env:
+### Backend
+- `Vercel` كمشروع Python منفصل أو خدمة منفصلة
+
+### Database
+- `Supabase PostgreSQL`
+
+### Cache
+- اختياري
+- إذا لم يوجد Redis، فالمشروع يعمل مع fallback داخل الذاكرة
+
+## لماذا هذا الخيار مناسب
+- الواجهة أصلًا `Next.js`
+- الباك يمكن تشغيله كوظيفة Python
+- PostgreSQL الخارجي يناسب الحالة الحالية
+- مناسب للتشغيل السريع والتكلفة المنخفضة
+
+## القيد المهم
+هذا المسار ممتاز لتشغيل:
+- chat endpoints
+- stats
+- audit
+- الواجهة
+
+لكنه ليس الخيار الأفضل لتشغيل عمليات maintenance الثقيلة داخل بيئة serverless، مثل:
+- full reindex على بيانات كبيرة
+- أي عملية طويلة قد تتجاوز حدود زمن التنفيذ
+
+لهذا السبب:
+- يفضل تنفيذ reindex الثقيل محليًا ضد قاعدة البيانات المستهدفة
+- أو استخدام بيئة backend طويلة العمر إذا تحولت الأعمال الثقيلة إلى جزء دوري من التشغيل
+
+---
+
+## 3. الخيار البديل
+
+المستودع يحتوي أيضًا:
+- `render.yaml`
+
+وهذا يمثل خيارًا بديلاً عندما تكون الأولوية:
+- backend طويل العمر
+- Redis مدعوم رسميًا
+- تشغيل maintenance operations على الخادم نفسه بسهولة أكبر
+
+## ملاحظة مهمة
+`render.yaml` الموجود في المستودع ليس خيارًا مجانيًا صرفًا بالضرورة، بل blueprint تشغيلي بديل.  
+إذا كانت الأولوية الحالية هي التكلفة المنخفضة أو التير المجاني، فالمسار الموصى به أعلاه هو الأنسب.
+
+---
+
+## 4. النشر الموصى به خطوة بخطوة
+
+## المرحلة 1: تجهيز قاعدة البيانات
+
+أنشئ مشروع PostgreSQL مناسبًا وفعّل `pgvector`.
+
+المتغير المطلوب في الباك:
 
 ```env
 DATABASE_URL=postgresql://...
-OPENAI_API_KEY=...
-CORS_ALLOWED_ORIGINS=https://<your-frontend-project>.vercel.app
-CORS_ALLOWED_ORIGIN_REGEX=^https://.*\.vercel\.app$
 ```
 
-Optional:
+## المرحلة 2: نشر الـ backend
+
+المجلد المعني:
+- `backend/`
+
+ملفات مهمة لهذا المسار:
+- `backend/run.py`
+- `backend/api/index.py`
+
+المتغيرات الأساسية:
 
 ```env
-REDIS_URL=
+DATABASE_URL=postgresql://...
+CORS_ALLOWED_ORIGINS=https://your-frontend-domain
 ```
 
-If `REDIS_URL` is not set, the app falls back safely to local in-memory behavior.
+المتغيرات الاختيارية:
 
-### Database on Supabase
-- Create a free Postgres project
-- Use its connection string as `DATABASE_URL`
-- Enable `pgvector`
-
-If needed, the application also attempts:
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
+```env
+OPENAI_API_KEY=...
+REDIS_URL=redis://...
+CORS_ALLOWED_ORIGIN_REGEX=^https://.*\\.vercel\\.app$
+ENABLE_AI_REGENERATION=false
+AI_MAX_REGENERATION_ATTEMPTS=1
 ```
 
-## Data Loading Strategy
+## المرحلة 3: نشر الـ frontend
 
-Use Supabase as the persistent production database, but do the heavy bootstrap from your local machine:
+المجلد المعني:
+- `frontend/`
 
-1. Put the Supabase connection string in `backend/.env`
-2. Run the backend locally
-3. Upload `unified_ontology.ttl`
-4. Run reindex locally if you want AI embeddings
+المتغير الأساسي:
 
-This avoids serverless timeout pressure during the initial data preparation.
+```env
+NEXT_PUBLIC_API_BASE_URL=https://your-backend-domain
+```
 
-## Practical Deployment Order
+## المرحلة 4: تحميل البيانات
 
-1. Create a free Supabase project
-2. Put the Supabase `DATABASE_URL` in the backend Vercel project
-3. Deploy backend from `backend/`
-4. Deploy frontend from `frontend/`
-5. Set `NEXT_PUBLIC_API_BASE_URL` to the backend URL
-6. Set backend `CORS_ALLOWED_ORIGINS` to the frontend URL
-7. Run ontology upload and optional reindex from local machine against Supabase
+بعد تشغيل الباك وربطه بالقاعدة:
 
-## Minimum Verification Checklist
+1. ارفع ملف `TTL`
+2. تأكد من امتلاء:
+   - `concepts`
+   - `concept_synonyms`
+   - `concept_relations`
+3. اترك `documents` فارغًا، فهذا متوقع
 
-### Backend
-- `GET /api/health` responds
-- `GET /api/stats` responds
-- `GET /api/debug/database-audit` responds
+## المرحلة 5: إعادة الفهرسة عند الحاجة
 
-### Frontend
-- The homepage loads
-- chat requests reach the backend
-- `without_ai` works
+إذا كنت تريد embeddings:
+- نفّذ `reindex` فقط عندما يكون `OPENAI_API_KEY` موجودًا
+- ويفضل تنفيذ العملية الثقيلة محليًا ضد قاعدة البيانات المستهدفة، خصوصًا في بيئات serverless
 
-### Database
-- `concepts`, `concept_synonyms`, and `concept_relations` are populated
-- `documents` remains intentionally empty
+---
 
-## Official References
+## 5. المتغيرات البيئية حسب الطبقة
 
-- Vercel FastAPI: https://vercel.com/docs/frameworks/backend/fastapi/
-- Vercel limits: https://vercel.com/docs/limits/overview
-- Vercel monorepos: https://vercel.com/docs/monorepos/monorepo-faq
-- Supabase compute: https://supabase.com/docs/guides/platform/compute-and-disk
+## Backend
+
+### مطلوبة
+- `DATABASE_URL`
+- `CORS_ALLOWED_ORIGINS`
+
+### اختيارية
+- `OPENAI_API_KEY`
+- `REDIS_URL`
+- `CORS_ALLOWED_ORIGIN_REGEX`
+- `ENABLE_AI_REGENERATION`
+- `AI_MAX_REGENERATION_ATTEMPTS`
+
+## Frontend
+
+### مطلوبة
+- `NEXT_PUBLIC_API_BASE_URL`
+
+### بديل fallback
+- `NEXT_PUBLIC_CHAT_API_URL`
+
+---
+
+## 6. ما الذي يجب نشره وما الذي لا يجب نشره
+
+## يجب نشره
+- كود `backend`
+- كود `frontend`
+- ملفات التوثيق العامة
+- ملف الأنطولوجيا إذا كان جزءًا من المستودع العام المقصود
+
+## لا يجب نشره
+- أي ملف `.env`
+- أي secrets أو tokens
+- أي روابط قواعد بيانات خاصة
+- أي مفاتيح OpenAI أو Redis أو مفاتيح منصات النشر
+- ملفات dump خاصة أو سجلات تشغيل حساسة
+
+---
+
+## 7. التحقق بعد النشر
+
+## Backend
+تحقق من:
+- `GET /api/health`
+- `GET /api/stats`
+- `GET /api/debug/database-audit`
+
+## Frontend
+تحقق من:
+- تحميل الصفحة الرئيسية
+- عمل وضعي `AI` و`without_ai`
+- وصول الطلبات إلى الباك
+- ظهور لوحة الاستكشاف
+- عمل `/admin`
+
+## Database
+تحقق من:
+- امتلاء `concepts`
+- امتلاء `concept_synonyms`
+- امتلاء `concept_relations`
+- بقاء `documents` في الحالة المقصودة
+
+---
+
+## 8. ملاحظات تشغيلية مهمة
+
+### 1. `without_ai` لا يحتاج embeddings
+إذا كان المطلوب فقط تشغيل `without_ai` بكفاءة:
+- لا تعتبر reindex شرطًا أوليًا
+
+### 2. `AI` يحتاج `OPENAI_API_KEY`
+وجود زر `AI` في الواجهة لا يكفي وحده.  
+يجب أن يكون المفتاح مضبوطًا في backend environment.
+
+### 3. إعادة الفهرسة ليست خطوة نشر إلزامية
+نفذها فقط إذا كنت تحتاج embeddings فعليًا.
+
+### 4. Redis اختياري
+إذا لم يكن Redis موجودًا:
+- الكاش وrate limiting سيعملان محليًا داخل العملية
+- لكنه ليس بديلًا كاملاً لطبقة cache مشتركة بين instances متعددة
+
+### 5. CORS يجب ضبطه بدقة
+خصوصًا في النشر العام، حتى لا يتم رفض الطلبات أو فتح المجال بشكل أوسع من اللازم.
+
+---
+
+## 9. استخدام `render.yaml`
+
+الملف:
+- [`render.yaml`](./render.yaml)
+
+يوفر blueprint بديلًا يحتوي:
+- Web service للـ backend
+- Redis/KeyValue
+- Postgres
+
+استخدمه فقط إذا كان هذا المسار يناسب:
+- ميزانية المشروع
+- الحاجة إلى خدمة backend أطول عمرًا
+- الحاجة إلى تشغيل maintenance مباشرة على الخادم
+
+---
+
+## 10. الخلاصة
+
+إذا كانت الأولوية الحالية:
+- سرعة بدء التشغيل
+- تقليل التكلفة
+- فصل الواجهة والباك بطريقة بسيطة
+
+فالمسار الأنسب هو:
+- `Frontend`: Vercel
+- `Backend`: Vercel Python deployment
+- `Database`: PostgreSQL خارجي يدعم `pgvector`
+
+أما إذا أصبحت العمليات الثقيلة أو إدارة البنية أهم من البساطة، فحينها يمكن نقل الـ backend إلى مسار أطول عمرًا مثل المسار الذي يخدمه `render.yaml`.

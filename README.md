@@ -1,109 +1,222 @@
 # Hussein
 
-مشروع دردشة معرفية عربي مبني فوق أنطولوجيا `TTL`، ويقدّم مسارين للاستجابة:
+نظام دردشة معرفي عربي مبني فوق أنطولوجيا بصيغة `TTL`، يقدّم استرجاعًا معرفيًا موجّهًا للمفاهيم والعلاقات، مع مسارين للإجابة:
 
-- `AI`: استدلال محلي + توليد عبر OpenAI عند توفر المفتاح.
-- `without_ai`: استدلال محلي كامل بدون إرسال أي طلبات إلى نماذج AI.
+- `AI`: استرجاع محلي مضبوط بالسياق ثم توليد جواب عربي ثري عند توفر مفتاح OpenAI.
+- `without_ai`: مسار محلي بالكامل يعتمد على القاعدة والمطابقة والعلاقات والقوالب، بدون أي نداءات إلى نماذج AI.
 
-البيانات المصدرية الحالية موجودة في [unified_ontology.ttl](./unified_ontology.ttl)، وتُغذّي قاعدة البيانات عبر مسار ingest في الباك.
+المشروع مصمم ليجمع بين:
+- وضوح الاسترجاع المعرفي
+- قابلية التشغيل بدون AI
+- واجهة دردشة عربية حديثة
+- لوحة تشغيل وإدارة للأنطولوجيا
 
-## هيكل المشروع
+---
 
-- [backend](./backend): FastAPI + PostgreSQL/pgvector + منطق الاستدلال والـ ingestion
-- [frontend](./frontend): Next.js لواجهة المحادثة ولوحة الإدارة
-- [DEPLOYMENT.md](./DEPLOYMENT.md): خطة النشر المجانية المقترحة على Vercel + Supabase
-- [خطة التنفيذ الكاملة.md](./خطة التنفيذ الكاملة.md): مرجع التخطيط والتنفيذ للمشروع
+## نظرة سريعة
 
-## المتطلبات
+### ما الذي يقدمه المشروع
+- استيعاب ملف أنطولوجيا `TTL` وتحويله إلى بنية قابلة للاستعلام.
+- مطابقة الأسئلة العربية مع المفاهيم والمرادفات والعلاقات.
+- توسعة السياق عبر العلاقات المرتبطة بالمفهوم بحسب نوع السؤال.
+- إجابات عربية منظمة في وضعين مستقلين: `AI` و`without_ai`.
+- لوحة استكشاف معرفي تفاعلية داخل الواجهة.
+- لوحة إدارة لرفع الأنطولوجيا، إعادة الفهرسة، ومراجعة حالة قاعدة البيانات.
 
-- Python 3.10+
-- PostgreSQL مع `pgvector`
-- Node.js 20+ و `npm`
-- Redis اختياري للكاش والـ rate limiting
-- مفتاح OpenAI اختياري لمسار `AI` ولتوليد embeddings
+### لماذا يوجد مساران للإجابة
+- `AI` مناسب عندما يكون المطلوب تفسيرًا أوسع وتحليلًا أكثر سلاسة.
+- `without_ai` مناسب عندما تكون الأولوية للسرعة، الحتمية، وعدم استهلاك أي توكنات خارجية.
 
-## التشغيل السريع
+---
 
-### 1. تجهيز الباك
+## المعمارية باختصار
 
-من داخل [backend](./backend):
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+```text
+unified_ontology.ttl
+        |
+        v
+TTL Parser + Normalization
+        |
+        v
+PostgreSQL / pgvector
+        |
+        +--> In-memory runtime snapshot
+        |
+        v
+FastAPI retrieval pipeline
+  - intent analysis
+  - concept matching
+  - relation expansion
+  - answer composition
+        |
+        +--> AI mode
+        +--> without_ai mode
+        |
+        v
+Next.js chat UI + admin dashboard
 ```
 
-أنشئ ملف `backend/.env` اعتمادًا على `.env.example`:
+---
 
-```env
-DATABASE_URL=postgresql://user:password@localhost:5432/ontology_db
-OPENAI_API_KEY=your_openai_api_key_here
-REDIS_URL=redis://localhost:6379
+## مكونات المشروع
+
+### Backend
+- `FastAPI`
+- `SQLAlchemy`
+- `PostgreSQL`
+- `pgvector`
+- `Redis` اختياري للكاش والـ rate limiting
+- `OpenAI` اختياري لمسار `AI` والـ embeddings
+
+### Frontend
+- `Next.js`
+- `React`
+- `TypeScript`
+- `Tailwind CSS`
+
+---
+
+## هيكل المستودع
+
+```text
+backend/   API, retrieval pipeline, ingestion, validation, embeddings
+frontend/  Chat UI, insight panel, admin dashboard
+unified_ontology.ttl
+DEPLOYMENT.md
+توثيق المشروع الفعلي.md
 ```
 
-ثم شغّل الخادم:
+---
+
+## التشغيل المحلي
+
+## 1. تشغيل الـ backend
 
 ```bash
 cd backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 python run.py
 ```
 
-### 2. تجهيز الفرونت
+### الحد الأدنى من الإعداد
+أنشئ ملف `backend/.env` اعتمادًا على `backend/.env.example`.
 
-من داخل [frontend](./frontend):
+المتغيرات الأهم:
+- `DATABASE_URL`
+- `OPENAI_API_KEY` اختياري
+- `REDIS_URL` اختياري
+- `CORS_ALLOWED_ORIGINS`
+
+## 2. تشغيل الـ frontend
 
 ```bash
+cd frontend
 npm install
 npm run dev
 ```
 
-إذا أردت تحديد عنوان الباك صراحة:
+### متغير البيئة الأساسي
+أنشئ `frontend/.env.local` إذا لزم:
 
 ```env
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ```
 
-## المسارات الأساسية
+---
 
-- `POST /api/chat/query`: المحادثة مع `AI` عند توفر المفتاح
-- `POST /api/chat/query-without-ai`: محادثة محلية بالكامل بدون OpenAI
-- `POST /api/ontology/upload`: رفع ملف `TTL` وإعادة تغذية الجداول
-- `POST /api/ontology/reindex`: إعادة بناء embeddings المدعومة
-- `GET /api/stats`: إحصائيات التشغيل والتغطية
-- `GET /api/debug/database-audit`: تشخيص كامل لحالة قاعدة البيانات
-- `GET /api/health`: فحص الصحة
+## أهم الصفحات
 
-## الصفحات الأساسية
+### `/`
+واجهة المحادثة الرئيسية، وتدعم:
+- التبديل بين `AI` و`بدون AI`
+- تنسيق Markdown
+- اقتراحات أسئلة حسب الوضع
+- مؤشر كتابة وتمييز بصري بين المسارين
+- لوحة استكشاف معرفي تفاعلية
 
-- `/`: واجهة المحادثة الرئيسية
-- `/admin`: لوحة الإدارة ورفع `TTL` ومتابعة الإحصائيات و`database-audit`
+### `/admin`
+لوحة الإدارة، وتدعم:
+- رفع ملف `TTL`
+- إعادة الفهرسة
+- مراجعة الإحصائيات
+- فحص قاعدة البيانات عبر `database-audit`
 
-## ملاحظات تشغيلية
+---
 
-- جدول `documents` موجود في السكيمة لكنه غير مُغذى من `TTL` الحالي عمدًا.
-- بعض العلاقات قد تحتوي `source_concept_id` أو `target_concept_id` بقيمة `NULL` عندما يشير `TTL` إلى أطراف غير معرّفة كمفاهيم مستقلة. هذا سلوك صحيح.
-- مسار `without_ai` لا ينبغي أن يرسل أي طلبات إلى OpenAI، ويعتمد فقط على التحليل المحلي والمطابقة النصية والعلاقات.
+## أهم مسارات الـ API
 
-## التحقق
+- `POST /api/chat/query`
+- `POST /api/chat/query-without-ai`
+- `POST /api/ontology/upload`
+- `POST /api/ontology/reindex`
+- `GET /api/stats`
+- `GET /api/health`
+- `GET /api/debug/database-audit`
+
+---
+
+## التشغيل المعرفي
+
+المشروع لا يتعامل مع الجواب كنص حر فقط، بل يمر عبر مراحل واضحة:
+
+1. تنظيف السؤال والتحقق منه.
+2. تحليل intent للسؤال.
+3. مطابقة المفهوم الأنسب.
+4. توسعة العلاقات المرتبطة بالمفهوم.
+5. توليد الجواب:
+   - محليًا في `without_ai`
+   - أو عبر LLM مضبوط بالسياق في `AI`
+6. التحقق من grounding قبل إعادة النتيجة.
+
+---
+
+## ملاحظات تشغيلية مهمة
+
+- جدول `documents` موجود في السكيمة لكنه غير مغذى من مصدر الـ `TTL` الحالي.
+- بعض العلاقات قد تشير إلى أطراف غير معرفة كمفاهيم مستقلة، ولذلك قد تبقى بعض foreign keys فارغة بشكل صحيح.
+- `without_ai` لا يستخدم OpenAI إطلاقًا.
+- إعادة بناء embeddings عملية تشغيلية مستقلة، وليست شرطًا لعمل `without_ai`.
+- العمليات الثقيلة مثل إعادة الفهرسة الكاملة يفضل تنفيذها محليًا ضد قاعدة البيانات المستهدفة، لا عبر بيئة serverless محدودة.
+
+---
+
+## التحقق الأساسي
 
 ### Backend
-
 ```bash
 cd backend
 python -m unittest discover tests
-python -m py_compile app/main.py core/models.py processing/ttl_parser.py processing/query_analyzer.py processing/concept_matcher.py processing/relation_expander.py generation/answer_composer.py generation/answer_generator.py generation/answer_validator.py services/openai_client.py services/embedding_service.py
+python -m py_compile app/main.py
 ```
 
 ### Frontend
-
 ```bash
 cd frontend
 npm run lint
 npm run build
 ```
 
-## توثيق فرعي
+---
 
-- [backend/README.md](./backend/README.md)
-- [frontend/README.md](./frontend/README.md)
+## التوثيق
+
+- [DEPLOYMENT.md](./DEPLOYMENT.md): توثيق النشر والخيارات التشغيلية.
+- [backend/README.md](./backend/README.md): توثيق الخدمة الخلفية.
+- [frontend/README.md](./frontend/README.md): توثيق الواجهة الأمامية.
+- [توثيق المشروع الفعلي.md](./توثيق%20المشروع%20الفعلي.md): المرجع التفصيلي الشامل للحالة الحالية والمعمارية.
+
+---
+
+## ملاحظات أمنية
+
+- لا تحفظ أي مفاتيح أو روابط خاصة أو بيانات بيئة حقيقية داخل المستودع.
+- استخدم ملفات `.env` محلية أو متغيرات بيئة في منصة النشر.
+- راجع CORS وRate Limiting قبل أي نشر عام.
+
+---
+
+## الرخصة
+
+لا توجد رخصة منشورة حاليًا داخل المستودع. إذا كان المشروع سيصبح عامًا لفريق أوسع أو للاستخدام الخارجي، يفضل إضافة `LICENSE` واضحة.
