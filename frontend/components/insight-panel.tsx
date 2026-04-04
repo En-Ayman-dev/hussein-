@@ -122,12 +122,12 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
   }
 
   return (
-    <div className="space-y-5">
-      <div className="rounded-2xl border border-slate-200/80 bg-slate-50/75 px-4 py-4">
-        <div className="flex items-start justify-between gap-3">
+    <div className="space-y-4 sm:space-y-5">
+      <div className="rounded-xl border border-slate-200/80 bg-slate-50/75 px-3.5 py-3.5 sm:rounded-2xl sm:px-4 sm:py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold tracking-[0.18em] text-slate-400">لوحة الاستكشاف</p>
-            <h3 className="mt-2 text-2xl font-semibold text-slate-950">
+            <h3 className="mt-2 text-xl font-semibold text-slate-950 sm:text-2xl">
               {insight.title || "نتيجة البحث"}
             </h3>
           </div>
@@ -137,13 +137,13 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
         </div>
 
         {insight.summary ? (
-          <p className="mt-4 text-sm leading-8 text-slate-700">{insight.summary}</p>
+          <p className="mt-3 text-[13px] leading-7 text-slate-700 sm:mt-4 sm:text-sm sm:leading-8">{insight.summary}</p>
         ) : insight.definition ? (
-          <p className="mt-4 text-sm leading-8 text-slate-600">{insight.definition}</p>
+          <p className="mt-3 text-[13px] leading-7 text-slate-600 sm:mt-4 sm:text-sm sm:leading-8">{insight.definition}</p>
         ) : null}
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex gap-2 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible">
         {orderedSections.map((section) => {
           const count = sectionCount(insight, section);
           if (count === 0) {
@@ -159,7 +159,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
               type="button"
               onClick={() => toggleSection(section)}
               className={[
-                "rounded-full border px-3 py-2 text-xs font-semibold shadow-sm transition",
+                "shrink-0 rounded-full border px-3 py-1.5 text-[11px] font-semibold shadow-sm transition sm:py-2 sm:text-xs",
                 isActive
                   ? isFocused
                     ? "border-sky-500 bg-sky-600 text-white shadow-[0_10px_24px_-16px_rgba(2,132,199,0.85)]"
@@ -186,7 +186,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
             <section
               key={section}
               className={[
-                "overflow-hidden rounded-2xl border bg-white/85 transition",
+                "overflow-hidden rounded-xl border bg-white/85 transition sm:rounded-2xl",
                 isOpen
                   ? insight.focusSection === section
                     ? "border-sky-300 shadow-[0_18px_40px_-28px_rgba(14,165,233,0.45)]"
@@ -198,7 +198,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                 type="button"
                 onClick={() => toggleSection(section)}
                 className={[
-                  "flex w-full items-center justify-between gap-4 px-4 py-4 text-right transition",
+                  "flex w-full items-center justify-between gap-4 px-3.5 py-3.5 text-right transition sm:px-4 sm:py-4",
                   isOpen
                     ? insight.focusSection === section
                       ? "bg-sky-50/80"
@@ -208,11 +208,11 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
               >
                 <div>
                   <p className="text-sm font-semibold text-slate-900">{sectionLabel(section)}</p>
-                  <p className="mt-1 text-xs text-slate-500">{count} عناصر ظاهرة في هذا القسم</p>
+                  <p className="mt-1 text-[11px] text-slate-500 sm:text-xs">{count} عناصر ظاهرة في هذا القسم</p>
                 </div>
                 <span
                   className={[
-                    "flex h-9 w-9 items-center justify-center rounded-full border text-lg font-semibold transition",
+                    "flex h-8 w-8 items-center justify-center rounded-full border text-base font-semibold transition sm:h-9 sm:w-9 sm:text-lg",
                     isOpen
                       ? insight.focusSection === section
                         ? "border-sky-300 bg-sky-600 text-white"
@@ -225,20 +225,20 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
               </button>
 
               {isOpen ? (
-                <div className="border-t border-slate-200/80 px-4 py-4">
+                <div className="border-t border-slate-200/80 px-3.5 py-3.5 sm:px-4 sm:py-4">
                   {section === "overview" ? (
-                    <div className="space-y-4">
+                    <div className="space-y-3 sm:space-y-4">
                       {insight.summary ? (
-                        <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 px-4 py-4">
+                        <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 px-3.5 py-3.5 sm:rounded-2xl sm:px-4 sm:py-4">
                           <p className="text-sm font-semibold text-slate-900">الخلاصة</p>
-                          <p className="mt-2 text-sm leading-8 text-slate-700">{insight.summary}</p>
+                          <p className="mt-2 text-[13px] leading-7 text-slate-700 sm:text-sm sm:leading-8">{insight.summary}</p>
                         </div>
                       ) : null}
 
                       {insight.definition ? (
-                        <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 px-4 py-4">
+                        <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 px-3.5 py-3.5 sm:rounded-2xl sm:px-4 sm:py-4">
                           <p className="text-sm font-semibold text-slate-900">التعريف الأوضح</p>
-                          <p className="mt-2 text-sm leading-8 text-slate-700">{insight.definition}</p>
+                          <p className="mt-2 text-[13px] leading-7 text-slate-700 sm:text-sm sm:leading-8">{insight.definition}</p>
                         </div>
                       ) : null}
                     </div>
@@ -249,7 +249,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                       {insight.actions.map((action) => (
                         <li
                           key={action}
-                          className="rounded-2xl border border-slate-200/80 bg-slate-50/70 px-4 py-3"
+                          className="rounded-xl border border-slate-200/80 bg-slate-50/70 px-3.5 py-3 sm:rounded-2xl sm:px-4"
                         >
                           {action}
                         </li>
@@ -258,11 +258,11 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                   ) : null}
 
                   {section === "relations" ? (
-                    <div className="space-y-4">
+                    <div className="space-y-3 sm:space-y-4">
                       {insight.relationGroups.map((group) => (
                         <div key={group.key} className="space-y-2">
                           <p className="text-sm font-semibold text-slate-900">{group.title}</p>
-                          <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+                          <div className="space-y-2 md:max-h-64 md:overflow-y-auto md:pr-1">
                             {group.items.map((item, index) => {
                               const selectionKey = `relation:${item.typeKey}:${item.target || item.text}:${index}`;
                               const isSelected = selectedFollowUpKey === selectionKey;
@@ -273,7 +273,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                                   type="button"
                                   onClick={() => handleRelationSelection(item, index)}
                                   className={[
-                                    "w-full rounded-2xl border px-4 py-3 text-right text-sm leading-7 transition",
+                                    "w-full rounded-xl border px-3.5 py-3 text-right text-sm leading-7 transition sm:rounded-2xl sm:px-4",
                                     isSelected
                                       ? "border-sky-400 bg-sky-100 text-sky-900 shadow-[0_10px_24px_-18px_rgba(2,132,199,0.65)]"
                                       : "border-slate-200/80 bg-slate-50/70 text-slate-700 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-900",
@@ -303,7 +303,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                   ) : null}
 
                   {section === "quotes" ? (
-                    <div className="max-h-72 space-y-3 overflow-y-auto pr-1">
+                    <div className="space-y-3 md:max-h-72 md:overflow-y-auto md:pr-1">
                       {(insight.quoteItems.length > 0
                         ? insight.quoteItems.map((quote, index) => {
                             const selectionKey = `quote:${quote.label}:${index}`;
@@ -315,7 +315,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                                 type="button"
                                 onClick={() => handleQuoteSelection(quote, index)}
                                 className={[
-                                  "w-full rounded-2xl border px-4 py-4 text-right text-sm leading-8 transition",
+                                  "w-full rounded-xl border px-3.5 py-3.5 text-right text-sm leading-7 transition sm:rounded-2xl sm:px-4 sm:py-4 sm:leading-8",
                                   isSelected
                                     ? "border-amber-400 bg-amber-100 text-amber-950 shadow-[0_10px_24px_-18px_rgba(245,158,11,0.7)]"
                                     : "border-sky-200 bg-sky-50/80 text-slate-700 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-950",
@@ -353,7 +353,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                                 type="button"
                                 onClick={() => handleQuoteSelection({ label: "اقتباس", text: quote }, index)}
                                 className={[
-                                  "w-full rounded-2xl border px-4 py-4 text-right text-sm leading-8 transition",
+                                  "w-full rounded-xl border px-3.5 py-3.5 text-right text-sm leading-7 transition sm:rounded-2xl sm:px-4 sm:py-4 sm:leading-8",
                                   isSelected
                                     ? "border-amber-400 bg-amber-100 text-amber-950 shadow-[0_10px_24px_-18px_rgba(245,158,11,0.7)]"
                                     : "border-sky-200 bg-sky-50/80 text-slate-700 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-950",
@@ -387,7 +387,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                   {section === "concepts" ? (
                     <div className="space-y-3">
                       {onSelectTerm ? (
-                        <p className="text-xs leading-6 text-slate-500">
+                        <p className="text-[11px] leading-6 text-slate-500 sm:text-xs">
                           اضغط على أي مفهوم لملء السؤال به مباشرة.
                         </p>
                       ) : null}
@@ -398,7 +398,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                             type="button"
                             onClick={() => handleTermSelection(term)}
                             className={[
-                              "rounded-full border px-3 py-1.5 text-sm transition",
+                              "rounded-full border px-3 py-1.5 text-xs transition sm:text-sm",
                               selectedFollowUpKey === `term:${term}`
                                 ? "border-emerald-400 bg-emerald-100 text-emerald-900 shadow-[0_10px_24px_-18px_rgba(16,185,129,0.65)]"
                                 : "border-slate-200 bg-slate-50 text-slate-700 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-800",

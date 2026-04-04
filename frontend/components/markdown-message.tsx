@@ -31,7 +31,7 @@ function renderContentBlock(lines: string[], key: string) {
 
   if (allBullets) {
     return (
-      <ul key={key} className="space-y-2 text-[15px] leading-8 text-slate-700">
+      <ul key={key} className="space-y-2 text-sm leading-7 text-slate-700 [overflow-wrap:anywhere] sm:text-[15px] sm:leading-8">
         {lines.map((line, index) => (
           <li key={`${key}-bullet-${index}`} className="flex gap-3">
             <span className="mt-2 h-2 w-2 rounded-full bg-sky-500/80" />
@@ -46,7 +46,7 @@ function renderContentBlock(lines: string[], key: string) {
     return (
       <blockquote
         key={key}
-        className="rounded-2xl border border-sky-200/80 bg-sky-50/90 px-4 py-3 text-[15px] leading-8 text-slate-700"
+        className="rounded-xl border border-sky-200/80 bg-sky-50/90 px-3.5 py-3 text-sm leading-7 text-slate-700 [overflow-wrap:anywhere] sm:rounded-2xl sm:px-4 sm:text-[15px] sm:leading-8"
       >
         {lines.map((line, index) => (
           <p key={`${key}-quote-${index}`}>{renderInline(line.replace(/^>\s*/, ""))}</p>
@@ -56,7 +56,7 @@ function renderContentBlock(lines: string[], key: string) {
   }
 
   return (
-    <div key={key} className="space-y-2 text-[15px] leading-8 text-slate-700">
+    <div key={key} className="space-y-2 text-sm leading-7 text-slate-700 [overflow-wrap:anywhere] sm:text-[15px] sm:leading-8">
       {lines.map((line, index) => (
         <p key={`${key}-paragraph-${index}`}>{renderInline(line)}</p>
       ))}
@@ -71,16 +71,16 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
     .filter((block) => block.length > 0);
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-3 break-words sm:space-y-4">
       {blocks.map((block, blockIndex) => {
         const [firstLine, ...restLines] = block;
         const headingMatch = firstLine?.match(/^\*\*(.+)\*\*$/);
         const bodyLines = headingMatch ? restLines : block;
 
         return (
-          <section key={`block-${blockIndex}`} className="space-y-3">
+          <section key={`block-${blockIndex}`} className="space-y-2.5 sm:space-y-3">
             {headingMatch ? (
-              <h3 className="text-sm font-semibold tracking-[0.14em] text-slate-500">
+              <h3 className="text-xs font-semibold tracking-[0.14em] text-slate-500 sm:text-sm">
                 {headingMatch[1]}
               </h3>
             ) : null}

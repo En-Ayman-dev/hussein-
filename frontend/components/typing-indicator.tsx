@@ -17,14 +17,14 @@ export function TypingIndicator({ responseMode = "ai" }: TypingIndicatorProps) {
   const titleText = isWithoutAi ? "المجيب المباشر" : "المجيب التحليلي";
 
   return (
-    <div className={`self-start rounded-[28px] border px-5 py-4 shadow-[0_18px_50px_-28px_rgba(15,23,42,0.35)] ${shellClasses}`}>
-      <div className="mb-3 flex items-center gap-3">
-        <span className={`flex h-10 w-10 items-center justify-center rounded-2xl text-sm font-semibold ${badgeClasses}`}>
+    <div className={`w-full max-w-full self-start rounded-[22px] border px-4 py-3 shadow-[0_18px_50px_-28px_rgba(15,23,42,0.35)] sm:max-w-[92%] sm:rounded-[26px] sm:px-5 sm:py-4 xl:max-w-[88%] ${shellClasses}`}>
+      <div className="mb-2.5 flex items-center gap-3 sm:mb-3">
+        <span className={`flex h-8 w-8 items-center justify-center rounded-xl text-xs font-semibold sm:h-10 sm:w-10 sm:rounded-2xl sm:text-sm ${badgeClasses}`}>
           {badgeText}
         </span>
         <div>
           <p className={`text-xs font-semibold tracking-[0.2em] ${labelClasses}`}>{titleText}</p>
-          <p className={`text-sm ${subLabelClasses}`}>يكتب الآن</p>
+          <p className={`text-xs sm:text-sm ${subLabelClasses}`}>يكتب الآن</p>
         </div>
       </div>
 
