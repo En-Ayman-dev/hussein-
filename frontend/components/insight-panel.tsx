@@ -6,6 +6,8 @@ export type InsightSectionKey = "overview" | "actions" | "relations" | "quotes" 
 
 export type InsightQuoteItem = {
   label: string;
+  lessonNumber?: string | null;
+  lessonTitle?: string | null;
   text: string;
 };
 
@@ -44,7 +46,7 @@ type InsightPanelProps = {
 
 function buildInitialSections(insight: InsightView): Record<InsightSectionKey, boolean> {
   return {
-    overview: true,
+    overview: false,
     actions: insight.focusSection === "actions",
     relations: insight.focusSection === "relations" || (insight.focusSection === "actions" && insight.relationGroups.length > 0),
     quotes: insight.focusSection === "quotes",
@@ -86,9 +88,8 @@ function sectionCount(insight: InsightView, key: InsightSectionKey): number {
   }
 }
 
-function orderSections(focusSection: InsightSectionKey): InsightSectionKey[] {
-  const ordered: InsightSectionKey[] = ["overview", focusSection, "actions", "relations", "quotes", "concepts"];
-  return ordered.filter((item, index) => ordered.indexOf(item) === index);
+function orderSections(): InsightSectionKey[] {
+  return ["quotes", "relations", "actions", "concepts"];
 }
 
 export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelectTerm }: InsightPanelProps) {
@@ -97,7 +98,7 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
   );
   const [selectedFollowUpKey, setSelectedFollowUpKey] = useState<string | null>(null);
 
-  const orderedSections = useMemo(() => orderSections(insight.focusSection), [insight.focusSection]);
+  const orderedSections = useMemo(() => orderSections(), []);
 
   function toggleSection(section: InsightSectionKey) {
     setOpenSections((current) => ({
@@ -119,6 +120,28 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
   function handleQuoteSelection(quote: InsightQuoteItem, index: number) {
     setSelectedFollowUpKey(`quote:${quote.label}:${index}`);
     onSelectQuote?.(quote);
+  }
+
+  function renderQuoteLessonMeta(quote: InsightQuoteItem, isSelected: boolean) {
+    const lessonParts = [
+      quote.lessonNumber ? `الدرس ${quote.lessonNumber}` : null,
+      quote.lessonTitle || null,
+    ].filter(Boolean);
+
+    if (lessonParts.length === 0) {
+      return null;
+    }
+
+    return (
+      <p
+        className={[
+          "mt-2 text-[11px] leading-6 sm:text-xs",
+          isSelected ? "text-amber-900" : "text-slate-500",
+        ].join(" ")}
+      >
+        {lessonParts.join(" - ")}
+      </p>
+    );
   }
 
   return (
@@ -226,24 +249,6 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
 
               {isOpen ? (
                 <div className="border-t border-slate-200/80 px-3.5 py-3.5 sm:px-4 sm:py-4">
-                  {section === "overview" ? (
-                    <div className="space-y-3 sm:space-y-4">
-                      {insight.summary ? (
-                        <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 px-3.5 py-3.5 sm:rounded-2xl sm:px-4 sm:py-4">
-                          <p className="text-sm font-semibold text-slate-900">الخلاصة</p>
-                          <p className="mt-2 text-[13px] leading-7 text-slate-700 sm:text-sm sm:leading-8">{insight.summary}</p>
-                        </div>
-                      ) : null}
-
-                      {insight.definition ? (
-                        <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 px-3.5 py-3.5 sm:rounded-2xl sm:px-4 sm:py-4">
-                          <p className="text-sm font-semibold text-slate-900">التعريف الأوضح</p>
-                          <p className="mt-2 text-[13px] leading-7 text-slate-700 sm:text-sm sm:leading-8">{insight.definition}</p>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-
                   {section === "actions" ? (
                     <ul className="space-y-2 text-sm leading-7 text-slate-700">
                       {insight.actions.map((action) => (
@@ -322,14 +327,17 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                                 ].join(" ")}
                               >
                                 <div className="mb-3 flex items-start justify-between gap-3">
-                                  <p
-                                    className={[
-                                      "text-xs font-semibold tracking-[0.14em]",
-                                      isSelected ? "text-amber-800" : "text-sky-700",
-                                    ].join(" ")}
-                                  >
-                                    {quote.label}
-                                  </p>
+                                  <div className="min-w-0">
+                                    <p
+                                      className={[
+                                        "text-xs font-semibold tracking-[0.14em]",
+                                        isSelected ? "text-amber-800" : "text-sky-700",
+                                      ].join(" ")}
+                                    >
+                                      {quote.label}
+                                    </p>
+                                    {renderQuoteLessonMeta(quote, isSelected)}
+                                  </div>
                                   <span
                                     className={[
                                       "rounded-full px-2 py-1 text-[11px] font-semibold",
@@ -360,14 +368,17 @@ export function InsightPanel({ insight, onSelectQuote, onSelectRelation, onSelec
                                 ].join(" ")}
                               >
                                 <div className="mb-3 flex items-start justify-between gap-3">
-                                  <p
-                                    className={[
-                                      "text-xs font-semibold tracking-[0.14em]",
-                                      isSelected ? "text-amber-800" : "text-sky-700",
-                                    ].join(" ")}
-                                  >
-                                    اقتباس
-                                  </p>
+                                  <div className="min-w-0">
+                                    <p
+                                      className={[
+                                        "text-xs font-semibold tracking-[0.14em]",
+                                        isSelected ? "text-amber-800" : "text-sky-700",
+                                      ].join(" ")}
+                                    >
+                                      اقتباس
+                                    </p>
+                                    {renderQuoteLessonMeta({ label: "اقتباس", text: quote }, isSelected)}
+                                  </div>
                                   <span
                                     className={[
                                       "rounded-full px-2 py-1 text-[11px] font-semibold",

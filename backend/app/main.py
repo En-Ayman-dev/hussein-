@@ -6,6 +6,7 @@ import re
 import tempfile
 import threading
 import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
@@ -95,6 +96,8 @@ RATE_LIMIT_RULES = {
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 database_schema_warnings: list[str] = []
+_lesson_context_lock = threading.Lock()
+_lesson_context_index: Optional[dict[str, dict[str, Optional[str]]]] = None
 
 
 def _create_redis_client() -> Optional[redis.Redis]:
@@ -265,7 +268,10 @@ def clear_query_cache() -> None:
 
 
 def _refresh_runtime_indexes(parsed_data: Optional[Dict[str, Any]] = None) -> None:
+    global _lesson_context_index
     snapshot = parsed_data or get_runtime_ontology_snapshot()
+    with _lesson_context_lock:
+        _lesson_context_index = None
     for component_name, component in (
         ("concept_matcher", concept_matcher),
         ("concept_matcher_without_ai", concept_matcher_without_ai),
@@ -325,6 +331,96 @@ def _concept_display_label(concept: Any) -> Optional[str]:
         if cleaned:
             return cleaned
     return None
+
+
+def _extract_lesson_number(uri: Optional[str]) -> Optional[str]:
+    if not uri:
+        return None
+    match = re.search(r"#F(\d+)_Lesson$", uri)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _first_non_empty_label(concept_data: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not concept_data:
+        return None
+    for label in concept_data.get("labels", []) or []:
+        cleaned = _clean_display_value(label)
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _build_lesson_context_index(snapshot: Dict[str, Any]) -> dict[str, dict[str, Optional[str]]]:
+    concepts_by_uri = {concept["uri"]: concept for concept in snapshot.get("concepts", [])}
+    outgoing_by_source: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+
+    for relation in snapshot.get("relations", []):
+        outgoing_by_source[relation["source"]][relation["type"]].append(relation["target"])
+
+    resolved: dict[str, dict[str, Optional[str]]] = {}
+
+    def resolve_for_uri(uri: str, visited: Optional[set[str]] = None) -> Optional[dict[str, Optional[str]]]:
+        if uri in resolved:
+            return resolved[uri]
+
+        chain = visited or set()
+        if uri in chain:
+            return None
+        chain = set(chain)
+        chain.add(uri)
+
+        lesson_uri: Optional[str] = None
+        if uri.endswith("_Lesson"):
+            lesson_uri = uri
+        else:
+            direct_lessons = outgoing_by_source.get(uri, {}).get("belongsToLesson", [])
+            if direct_lessons:
+                lesson_uri = direct_lessons[0]
+            else:
+                for group_uri in outgoing_by_source.get(uri, {}).get("belongsToGroup", []):
+                    resolved_group = resolve_for_uri(group_uri, chain)
+                    if resolved_group:
+                        resolved[uri] = resolved_group
+                        return resolved_group
+
+        if not lesson_uri:
+            return None
+
+        lesson_concept = concepts_by_uri.get(lesson_uri)
+        lesson_title = _first_non_empty_label(lesson_concept)
+        if not lesson_title:
+            collection_targets = outgoing_by_source.get(lesson_uri, {}).get("belongsToCollection", [])
+            if collection_targets:
+                lesson_title = _first_non_empty_label(concepts_by_uri.get(collection_targets[0]))
+
+        lesson_context = {
+            "lesson_number": _extract_lesson_number(lesson_uri),
+            "lesson_title": lesson_title,
+        }
+        resolved[uri] = lesson_context
+        return lesson_context
+
+    for concept_uri in concepts_by_uri:
+        lesson_context = resolve_for_uri(concept_uri)
+        if lesson_context:
+            resolved[concept_uri] = lesson_context
+
+    return resolved
+
+
+def _get_lesson_context(uri: Optional[str]) -> dict[str, Optional[str]]:
+    global _lesson_context_index
+    if not uri:
+        return {"lesson_number": None, "lesson_title": None}
+
+    if _lesson_context_index is None:
+        with _lesson_context_lock:
+            if _lesson_context_index is None:
+                _lesson_context_index = _build_lesson_context_index(get_runtime_ontology_snapshot())
+
+    return (_lesson_context_index or {}).get(uri, {"lesson_number": None, "lesson_title": None})
 
 
 def _clean_text_list(values: Any) -> list[str]:
@@ -1033,6 +1129,7 @@ async def _process_chat_query(request: QueryRequest, use_ai: bool) -> Dict[str, 
                 "quote": _clean_text_list(match.concept.quote),
                 "actions": _clean_text_list(match.concept.actions),
                 "importance": _clean_text_list(match.concept.importance),
+                "lesson_info": _get_lesson_context(match.concept.uri),
                 "confidence": round(match.confidence, 3),
             }
             for match in unique_concepts

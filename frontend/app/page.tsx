@@ -87,6 +87,10 @@ type ApiConcept = {
   confidence: number;
   definition: string[];
   importance?: string[];
+  lesson_info?: {
+    lesson_number?: string | null;
+    lesson_title?: string | null;
+  };
   labels: string[];
   quote: string[];
   uri: string;
@@ -443,7 +447,12 @@ function buildQuoteItems(concepts: ApiConcept[]): InsightView["quoteItems"] {
         continue;
       }
       seen.add(signature);
-      items.push({ label, text: quote });
+      items.push({
+        label,
+        lessonNumber: concept.lesson_info?.lesson_number || null,
+        lessonTitle: concept.lesson_info?.lesson_title || null,
+        text: quote,
+      });
     }
   }
 
@@ -878,19 +887,24 @@ export default function HomePage() {
     }
   }
 
-  function handleInsightTermSelection(term: string) {
-    setDraft(`ما معنى ${term}؟`);
+  function beginInsightFollowUp(nextDraft: string) {
+    setResponseMode("without_ai");
+    setMobilePanel("chat");
+    setMobileSuggestionsOpen(false);
+    setDraft(nextDraft);
     textareaRef.current?.focus();
+  }
+
+  function handleInsightTermSelection(term: string) {
+    beginInsightFollowUp(`ما معنى ${term}؟`);
   }
 
   function handleInsightRelationSelection(relation: DisplayRelation) {
-    setDraft(buildRelationFollowUpQuestion(activeInsight?.title || null, relation));
-    textareaRef.current?.focus();
+    beginInsightFollowUp(buildRelationFollowUpQuestion(activeInsight?.title || null, relation));
   }
 
   function handleInsightQuoteSelection(quote: InsightQuoteItem) {
-    setDraft(buildQuoteFollowUpQuestion(activeInsight?.title || null, quote));
-    textareaRef.current?.focus();
+    beginInsightFollowUp(buildQuoteFollowUpQuestion(activeInsight?.title || null, quote));
   }
 
   const hasConversationStarted = messages.length > 0;
